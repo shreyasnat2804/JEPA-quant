@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!--
+    USAGE
+    -----
+    1. Copy this file to  entries/YYYY-MM-DD_short-title.html
+    2. Replace every FILL IN section with your content
+    3. Drop images in  assets/images/  and reference as  ../assets/images/filename.png
+    4. Add a row to index.html and bump the stat counters
+  -->
+  <title>FILL IN: Experiment Title | JEPA-Quant Log</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="container">
+
+  <a class="back-link" href="../index.html">&larr; Research Log</a>
+
+  <!-- ═══ HEADER ═══ -->
+  <header class="entry-header">
+    <h1>FILL IN: Experiment Title</h1>
+    <div class="entry-meta">
+      <span><strong>Date</strong> YYYY-MM-DD</span>
+      <span><strong>Component</strong> FILL IN <!-- Price Encoder / Text Encoder / Predictor / VICReg / Codebook / Training Loop / Data / Evaluation --></span>
+      <span><strong>Status</strong>
+        <!-- Keep ONE badge, delete the rest -->
+        <span class="badge badge-ongoing">Ongoing</span>
+        <span class="badge badge-success">Success</span>
+        <span class="badge badge-failed">Failed</span>
+        <span class="badge badge-inconclusive">Inconclusive</span>
+      </span>
+      <span><strong>Time</strong> FILL IN <!-- e.g. 4 h --></span>
+    </div>
+  </header>
+
+  <!-- ═══ SUMMARY — write this last ═══ -->
+  <section class="section">
+    <h2>Summary</h2>
+    <p>FILL IN: One-paragraph executive summary of what you did and what you found. Write this after everything else.</p>
+  </section>
+
+  <!-- ═══ HYPOTHESIS ═══ -->
+  <section class="section">
+    <h2>Hypothesis / Motivation</h2>
+    <p>FILL IN: What did you expect to happen and why? What prior result or intuition motivated this experiment?</p>
+  </section>
+
+  <!-- ═══ SETUP ═══ -->
+  <section class="section">
+    <h2>Experimental Setup</h2>
+
+    <h3>Data</h3>
+    <p>FILL IN: Dataset, date range, universe size, preprocessing steps applied.</p>
+
+    <h3>Model configuration</h3>
+    <pre><code>FILL IN — paste key hyperparameters / config block here.
+
+Example:
+  price_encoder : moirai-small  frozen: true
+  predictor     : Qwen2.5-1.5B  lora_r: 16  lora_alpha: 32
+  ema_decay     : 0.996
+  batch_size    : 256
+  lr_proj       : 1e-4    lr_lora: 3e-5
+  lambda_v      : 25.0    lambda_c: 1.0
+  warmup_steps  : 500</code></pre>
+
+    <h3>Changes from previous run</h3>
+    <ul>
+      <li>FILL IN: What specifically changed vs the last experiment?</li>
+    </ul>
+  </section>
+
+  <!-- ═══ METHODOLOGY ═══ -->
+  <section class="section">
+    <h2>Methodology</h2>
+    <p>FILL IN: Step-by-step description of what you ran. Include training phases, manual interventions, commands used.</p>
+    <ol>
+      <li>FILL IN</li>
+      <li>FILL IN</li>
+    </ol>
+  </section>
+
+  <!-- ═══ RESULTS ═══ -->
+  <section class="section">
+    <h2>Results</h2>
+
+    <!-- Metric cards — edit values, add/remove cards freely -->
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-name">JEPA Loss</div>
+        <div class="metric-value">0.000</div>
+        <div class="metric-note">final val</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">VICReg V</div>
+        <div class="metric-value">0.000</div>
+        <div class="metric-note">variance term</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">VICReg C</div>
+        <div class="metric-value">0.000</div>
+        <div class="metric-note">covariance term</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">Codebook util.</div>
+        <div class="metric-value">0%</div>
+        <div class="metric-note">active vectors</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">z_price std</div>
+        <div class="metric-value">0.000</div>
+        <div class="metric-note">per-dim avg</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">Train steps</div>
+        <div class="metric-value">0 k</div>
+        <div class="metric-note"></div>
+      </div>
+    </div>
+
+    <!-- Single large image (loss curves, UMAP, attention maps, etc.) -->
+    <figure class="image-single">
+      <img src="../assets/images/REPLACE_WITH_FILENAME.png" alt="FILL IN alt text">
+      <figcaption>FILL IN: Caption explaining what this plot shows and what to notice.</figcaption>
+    </figure>
+
+    <!-- Uncomment for a multi-image grid
+    <div class="image-gallery">
+      <figure class="image-card">
+        <img src="../assets/images/plot1.png" alt="Plot 1">
+        <figcaption>Caption for plot 1</figcaption>
+      </figure>
+      <figure class="image-card">
+        <img src="../assets/images/plot2.png" alt="Plot 2">
+        <figcaption>Caption for plot 2</figcaption>
+      </figure>
+      <figure class="image-card">
+        <img src="../assets/images/plot3.png" alt="Plot 3">
+        <figcaption>Caption for plot 3</figcaption>
+      </figure>
+    </div>
+    -->
+
+    <h3>Raw output / logs</h3>
+    <pre><code>FILL IN: Paste relevant training log lines, eval output, or terminal excerpts here.</code></pre>
+  </section>
+
+  <!-- ═══ ANALYSIS ═══ -->
+  <section class="section">
+    <h2>Analysis &amp; Findings</h2>
+    <p>FILL IN: What do the numbers mean? What surprised you? What confirmed or contradicted your hypothesis?</p>
+
+    <div class="callout success">
+      FILL IN: Key positive finding — what definitively worked.
+    </div>
+    <div class="callout warning">
+      FILL IN: Open question or something to watch carefully.
+    </div>
+    <div class="callout danger">
+      FILL IN: What failed or must be fixed before moving on.
+    </div>
+  </section>
+
+  <!-- ═══ THOUGHT PROCESS ═══ -->
+  <section class="section">
+    <h2>Thought Process &amp; Debugging Notes</h2>
+    <p>FILL IN: Stream-of-consciousness notes. What rabbit holes did you go down? What did you almost do? What would you tell your past self before starting this experiment?</p>
+  </section>
+
+  <!-- ═══ LESSONS LEARNED ═══ -->
+  <section class="section">
+    <h2>Lessons Learned</h2>
+    <ul>
+      <li>FILL IN: Non-obvious fact this experiment revealed</li>
+      <li>FILL IN: What you would do differently</li>
+      <li>FILL IN: Gotcha to document in CLAUDE.md if it would trap a future agent</li>
+    </ul>
+  </section>
+
+  <!-- ═══ NEXT STEPS ═══ -->
+  <section class="section">
+    <h2>Next Steps</h2>
+    <ol>
+      <li>FILL IN: Highest-priority follow-up experiment</li>
+      <li>FILL IN</li>
+      <li>FILL IN</li>
+    </ol>
+  </section>
+
+  <footer class="site-footer">
+    JEPA-Quant &mdash; <a href="../index.html">Research Log</a> &mdash;
+    <a href="https://github.com/shreyasnat2804/JEPA-quant">GitHub</a>
+  </footer>
+
+</div>
+</body>
+</html>

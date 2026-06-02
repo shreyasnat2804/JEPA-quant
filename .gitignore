@@ -1,6 +1,6 @@
-# Claude Code
-CLAUDE.md
-.claude/
+# Claude Code — track CLAUDE.md, ignore local settings and hooks
+.claude/**
+!.claude/CLAUDE.md
 docs/
 
 # Python
