@@ -1,0 +1,37 @@
+# Claude Code
+CLAUDE.md
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ML artifacts
+*.ckpt
+*.pt
+*.pth
+wandb/
+runs/
+outputs/
+checkpoints/
+
+# Data
+data/raw/
+*.csv
+*.parquet
+
+# Env
+.env
+.env.*
+
+# OS
+.DS_Store
