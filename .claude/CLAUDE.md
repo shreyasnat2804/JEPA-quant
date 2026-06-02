@@ -162,3 +162,9 @@ Use HTML files in `docs/` for any concept that benefits from a diagram. Referenc
   2. **First Edit/Write per file** (including new files) — state what imports it, no duplicate exists, data fields, user instruction
   3. **Destructive Bash** (git rm, reset, etc.) — state files affected, one-line rollback, user instruction
   All gates pass on the second attempt after facts are presented.
+
+**2026-06-02 — Notebook env (local/VS Code vs Colab)**
+- Gotcha: macOS python.org builds don't trust the system keychain, so `aiohttp` raises `SSL: CERTIFICATE_VERIFY_FAILED` against `api.polygon.io`. Fix is in `PolygonClient`: build `ssl.create_default_context(cafile=certifi.where())` and pass it via `aiohttp.TCPConnector(ssl=ctx)`. Portable — no-op on Colab/Linux. `certifi` is in `requirements.txt`.
+- Colab notebook sync: running the setup cell's `git pull` updates repo code and any Drive copy, but **cannot refresh the notebook tab you're viewing** (a cell can't reload its own document). To get the latest notebook, reopen via File → Open notebook → GitHub tab. The old `shutil.copy2`-to-Drive block was removed because Colab autosave races it and clobbers the synced file.
+- Setup cell guards: `IN_VSCODE = VSCODE_PID/VSCODE_CWD present` forces `IN_COLAB=False` so a local VS Code kernel never triggers the Drive mount / clone. Limitation: a *remote* Colab kernel driven from VS Code won't expose `VSCODE_PID`, so it's still treated as Colab.
+- Local dev: use `.venv` (gitignored) as the VS Code kernel; deps in `requirements.txt`. The notebook's `%pip install` cell is then a fast no-op.

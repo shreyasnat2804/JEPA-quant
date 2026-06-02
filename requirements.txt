@@ -1,0 +1,8 @@
+aiohttp
+certifi
+nest-asyncio
+python-dotenv
+tqdm
+pandas
+pyarrow
+ipykernel
