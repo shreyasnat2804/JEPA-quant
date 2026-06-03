@@ -40,7 +40,12 @@ class LMPredictor(Predictor):
         self.latent_dim = cfg.latent_dim
         self.use_text = use_text
 
-        base = AutoModel.from_pretrained(cfg.lm_name)
+        # Qwen2.5 ships in bf16; load it in its native precision instead of
+        # upcasting to fp32 (~halves weight memory, faster matmuls, no quality
+        # loss — fp32 just zero-pads the mantissa). Projection heads stay fp32
+        # for training stability; the forward bridges dtypes at the LM boundary.
+        base = AutoModel.from_pretrained(cfg.lm_name, torch_dtype=torch.bfloat16)
+        self._lm_dtype = next(base.parameters()).dtype
         for p in base.parameters():
             p.requires_grad_(False)
         lora = LoraConfig(
@@ -65,10 +70,14 @@ class LMPredictor(Predictor):
             toks.append(self.text_in(z_text).unsqueeze(1))
         q = self.query.expand(z_price.size(0), -1, -1)
         toks.append(q)
-        embeds = torch.cat(toks, dim=1)  # [B, T, H]
+        embeds = torch.cat(toks, dim=1)  # [B, T, H] — fp32 from the projections
         attn = torch.ones(embeds.shape[:2], dtype=torch.long, device=embeds.device)
-        out = self.lm(inputs_embeds=embeds, attention_mask=attn).last_hidden_state
-        return self.out(out[:, -1])  # query token hidden state
+        # Bridge fp32 projections <-> bf16 LM: cast embeds into the LM dtype,
+        # cast the query hidden state back out for the fp32 output projection.
+        out = self.lm(
+            inputs_embeds=embeds.to(self._lm_dtype), attention_mask=attn
+        ).last_hidden_state
+        return self.out(out[:, -1].to(embeds.dtype))  # query token hidden state
 
     def _lora_parameters(self) -> Iterator[nn.Parameter]:
         for n, p in self.lm.named_parameters():
