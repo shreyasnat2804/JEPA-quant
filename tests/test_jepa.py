@@ -529,3 +529,72 @@ def test_trainer_codebook_kmeans_init_path(cfg):
     assert comp.regularizer._initialised is False
     trainer.maybe_kmeans_init(n_samples=16)
     assert comp.regularizer._initialised is True
+
+
+# ---------------------------------------------------------------------------
+# config.py — JEPAConfig consistency validation
+# ---------------------------------------------------------------------------
+
+
+def test_default_config_is_valid():
+    from jepa_quant import JEPAConfig
+
+    JEPAConfig()  # must not raise
+
+
+def test_config_rejects_n_features_price_cols_mismatch(cfg):
+    with pytest.raises(ValueError, match="n_features"):
+        dc.replace(cfg, price_encoder=dc.replace(cfg.price_encoder, n_features=N_FEATURES + 1))
+
+
+def test_config_rejects_context_length_mismatch(cfg):
+    with pytest.raises(ValueError, match="context_length"):
+        dc.replace(cfg, price_encoder=dc.replace(cfg.price_encoder, context_length=99))
+
+
+def test_config_rejects_predictor_latent_mismatch(cfg):
+    with pytest.raises(ValueError, match="latent_dim"):
+        dc.replace(cfg, predictor=dc.replace(cfg.predictor, latent_dim=LATENT_DIM + 1))
+
+
+def test_config_rejects_text_latent_mismatch_when_enabled(cfg):
+    with pytest.raises(ValueError, match="text_encoder.latent_dim"):
+        dc.replace(
+            cfg,
+            text_encoder=dc.replace(cfg.text_encoder, enabled=True, latent_dim=LATENT_DIM + 1),
+        )
+
+
+def test_config_allows_matching_text_latent_when_enabled(cfg):
+    # enabled text with a matching latent dim must be accepted
+    dc.replace(cfg, text_encoder=dc.replace(cfg.text_encoder, enabled=True, latent_dim=LATENT_DIM))
+
+
+# ---------------------------------------------------------------------------
+# build_dataloaders — val keeps the last partial batch
+# ---------------------------------------------------------------------------
+
+
+def test_val_loader_keeps_partial_batch_train_drops_it(cfg):
+    train_loader, val_loader = build_dataloaders(cfg)
+    assert train_loader.drop_last is True
+    assert val_loader.drop_last is False
+
+
+# ---------------------------------------------------------------------------
+# resolve_device — accelerator fallback
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_device_always_honours_cpu():
+    from jepa_quant.training.trainer import resolve_device
+
+    assert resolve_device("cpu").type == "cpu"
+
+
+def test_resolve_device_returns_valid_device_for_accelerator_request():
+    from jepa_quant.training.trainer import resolve_device
+
+    # Whatever the host has, the result is a real, usable device type.
+    assert resolve_device("cuda").type in {"cuda", "mps", "cpu"}
+    assert resolve_device("mps").type in {"cuda", "mps", "cpu"}

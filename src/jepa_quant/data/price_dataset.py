@@ -95,7 +95,9 @@ class PriceWindowDataset(Dataset):
 def build_dataloaders(cfg: JEPAConfig) -> Tuple[DataLoader, DataLoader]:
     train_ds = PriceWindowDataset(cfg.data, "train")
     val_ds = PriceWindowDataset(cfg.data, "val")
-    common = dict(batch_size=cfg.train.batch_size, num_workers=cfg.train.num_workers, drop_last=True)
-    train_loader = DataLoader(train_ds, shuffle=True, **common)
-    val_loader = DataLoader(val_ds, shuffle=False, **common)
+    common = dict(batch_size=cfg.train.batch_size, num_workers=cfg.train.num_workers)
+    # Train drops the last partial batch (stable batch stats for VICReg); val
+    # keeps it so a small validation split is not silently emptied.
+    train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **common)
+    val_loader = DataLoader(val_ds, shuffle=False, drop_last=False, **common)
     return train_loader, val_loader

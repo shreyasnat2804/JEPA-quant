@@ -177,3 +177,35 @@ class JEPAConfig:
     regularizer: str = "vicreg"
     vicreg: VICRegConfig = field(default_factory=VICRegConfig)
     codebook: CodebookConfig = field(default_factory=CodebookConfig)
+
+    def __post_init__(self) -> None:
+        """Fail fast on dimension mismatches that would otherwise surface as
+        opaque shape errors deep inside the model (or, worse, silently wrong
+        results). Cheap to check here, expensive to debug at a Linear call."""
+        pe = self.price_encoder
+        if pe.n_features != len(self.data.price_cols):
+            raise ValueError(
+                f"price_encoder.n_features ({pe.n_features}) must equal "
+                f"len(data.price_cols) ({len(self.data.price_cols)})."
+            )
+        if pe.context_length != self.data.context_length:
+            raise ValueError(
+                f"price_encoder.context_length ({pe.context_length}) must equal "
+                f"data.context_length ({self.data.context_length})."
+            )
+        # z_pred (predictor.latent_dim) and z_target (price_encoder.latent_dim,
+        # via the EMA copy) are compared directly in the JEPA loss.
+        if self.predictor.latent_dim != pe.latent_dim:
+            raise ValueError(
+                f"predictor.latent_dim ({self.predictor.latent_dim}) must equal "
+                f"price_encoder.latent_dim ({pe.latent_dim}) — they meet in the "
+                "JEPA loss."
+            )
+        # When text conditioning is on, z_text is projected through a head whose
+        # input dim is the price latent dim (see build_predictor in_dim).
+        if self.text_encoder.enabled and self.text_encoder.latent_dim != pe.latent_dim:
+            raise ValueError(
+                f"text_encoder.latent_dim ({self.text_encoder.latent_dim}) must "
+                f"equal price_encoder.latent_dim ({pe.latent_dim}) when text is "
+                "enabled."
+            )

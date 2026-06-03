@@ -143,10 +143,18 @@ class MoiraiPriceEncoder(PriceEncoder):
         self.module = MoiraiModule.from_pretrained(cfg.moirai_name)
         backbone_dim = getattr(self.module, "d_model", None) or self.module.encoder.layers[0].self_attn.embed_dim
 
-        if cfg.freeze_backbone:
-            for p in self.module.parameters():
-                p.requires_grad_(False)
+        # Always freeze the whole backbone, then (Phase 3) selectively re-enable
+        # ONLY the top-2 encoder layers — the exact set
+        # ``tunable_backbone_parameters`` exposes to the optimizer. Leaving the
+        # rest of the backbone with ``requires_grad=True`` would compute and
+        # store gradients that are never applied (memory/compute waste) and
+        # escape grad clipping, since they sit in no optimizer param group.
+        for p in self.module.parameters():
+            p.requires_grad_(False)
         self._frozen_backbone = cfg.freeze_backbone
+        if not cfg.freeze_backbone:
+            for p in self.module.encoder.layers[-2:].parameters():
+                p.requires_grad_(True)
 
         self.head = ProjectionHead(backbone_dim, cfg.latent_dim, hidden_dim=cfg.latent_dim)
 
