@@ -77,6 +77,17 @@ class JEPATrainer:
         val_loader: Optional[DataLoader] = None,
         jepa_kind: JepaKind = "cosine",
     ) -> None:
+        # An empty train loader would make ``_infinite`` spin forever yielding
+        # nothing (``next`` never returns) — fail loudly instead of hanging.
+        # ``drop_last=True`` empties the loader whenever the dataset has fewer
+        # than ``batch_size`` windows, so this is a realistic small-data trap.
+        if len(train_loader) == 0:
+            raise ValueError(
+                f"train_loader is empty ({len(train_loader.dataset)} windows, "
+                f"batch_size={cfg.train.batch_size}, drop_last=True). Reduce "
+                "batch_size or provide more data."
+            )
+
         self.cfg = cfg
         self.c = components
         self.train_loader = train_loader

@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+# src/ is a bare package dir (the notebook adds it to sys.path at runtime);
+# pythonpath makes `import jepa_quant` work under pytest without installing.
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "unit: fast, isolated unit tests",
+    "integration: cross-component tests",
+]
+
+[tool.coverage.run]
+source = ["src/jepa_quant"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
