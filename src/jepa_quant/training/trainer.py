@@ -40,6 +40,32 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def _mps_available() -> bool:
+    backend = getattr(torch.backends, "mps", None)
+    return bool(backend and backend.is_available())
+
+
+def resolve_device(requested: str) -> torch.device:
+    """Resolve a requested device string to an actually-available device.
+
+    ``"cpu"`` is always honoured. A requested accelerator is used when present;
+    otherwise we fall back to any other available accelerator (CUDA or Apple
+    MPS) before finally settling on CPU. This stops Apple-silicon machines from
+    silently running on CPU just because the default request was ``"cuda"``.
+    """
+    if requested == "cpu":
+        return torch.device("cpu")
+    if requested == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    if requested == "mps" and _mps_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if _mps_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 @dataclass
 class JEPAComponents:
     price_encoder: nn.Module
@@ -93,7 +119,7 @@ class JEPATrainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.jepa_kind = jepa_kind
-        self.device = torch.device(cfg.train.device if torch.cuda.is_available() or cfg.train.device == "cpu" else "cpu")
+        self.device = resolve_device(cfg.train.device)
 
         set_seed(cfg.train.seed)
         self._to_device()
