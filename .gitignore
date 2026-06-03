@@ -9,6 +9,13 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
 .venv/
 venv/
 env/

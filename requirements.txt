@@ -1,3 +1,4 @@
+# --- data ingestion ---
 aiohttp
 certifi
 nest-asyncio
@@ -6,3 +7,15 @@ tqdm
 pandas
 pyarrow
 ipykernel
+
+# --- JEPA model / training ---
+numpy
+torch
+scikit-learn
+matplotlib
+# foundation-model backends (optional — only for backend='moirai' / 'lm' / text encoder)
+transformers>=4.44
+peft>=0.11
+accelerate
+einops
+uni2ts>=1.1   # Salesforce Moirai price encoder
