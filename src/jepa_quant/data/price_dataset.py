@@ -20,12 +20,37 @@ from typing import Literal, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import torch
 from torch.utils.data import DataLoader, Dataset
 
 from ..config import DataConfig, JEPAConfig
 
 Split = Literal["train", "val"]
+
+
+def _read_price_frame(path: Path) -> pd.DataFrame:
+    """Read a price parquet robustly across pandas/pyarrow versions.
+
+    The files store a tz-aware datetime ``ts`` index. Letting pandas rebuild
+    that index from the parquet metadata trips a pandas<->pyarrow version bug
+    (seen on Colab with pandas 2.1.x + a newer pyarrow): ``datetime64 values
+    must have a unit specified``. We sidestep it by reading *without* the pandas
+    index metadata, ordering on the raw ``ts`` epoch in Arrow, then dropping
+    ``ts`` — the dataset needs price columns in chronological order, never the
+    timestamps themselves. Equivalent to ``read_parquet(path).sort_index()`` for
+    the columns we consume, but version-proof.
+    """
+    table = pq.read_table(path)
+    if "ts" in table.column_names:
+        ts = table.column("ts")
+        # Cast tz-aware timestamp -> int64 epoch so ordering never touches the
+        # fragile datetime->pandas conversion that raises the unit error.
+        key = pc.cast(ts, pa.int64(), safe=False) if pa.types.is_timestamp(ts.type) else ts
+        table = table.take(pc.sort_indices(key)).drop(["ts"])
+    return table.to_pandas(ignore_metadata=True)
 
 
 def _timestep_features(df: pd.DataFrame, price_cols: Sequence[str]) -> np.ndarray:
@@ -55,7 +80,7 @@ class PriceWindowDataset(Dataset):
             raise FileNotFoundError(f"No parquet files in {cfg.data_dir!r}")
 
         for path in files:
-            df = pd.read_parquet(path).sort_index()
+            df = _read_price_frame(path)
             feats = _timestep_features(df, cfg.price_cols)
             if len(feats) < self.span:
                 continue

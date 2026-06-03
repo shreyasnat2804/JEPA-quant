@@ -156,6 +156,19 @@ Use HTML files in `docs/` for any concept that benefits from a diagram. Referenc
 
 ### Log
 
+**2026-06-03 — Price parquets need a version-proof reader (tz-aware index trap)**
+- Gotcha: stock/option/futures parquets store a **tz-aware datetime index** (`ts: timestamp[ms, tz=UTC]`, written via `set_index('ts')`). On Colab, `requirements.txt` resolved to **pandas 2.1.4** against a newer bundled pyarrow, and rebuilding that index during `pd.read_parquet` crashes with `TypeError: datetime64 values must have a unit specified` (fails inside pyarrow `_reconstruct_index`/`_extract_index_level`). This stops `build_dataloaders` cold.
+- Fix: `price_dataset._read_price_frame()` reads via `pyarrow.parquet.read_table` → orders on the raw `ts` epoch in Arrow (`cast(ts,int64)` + `sort_indices`) → `drop(['ts'])` → `to_pandas(ignore_metadata=True)`. Never reconstructs the datetime index. The dataset only needs price cols in chronological order, never the timestamps. **Do not revert to `pd.read_parquet(path).sort_index()`** — it's version-fragile.
+- Note: the dep-conflict wall on Colab (pandas/numpy/scipy/torch pins fighting Colab's stack) is noisy but non-blocking; the autoreload `numpy`/`numpy.ma` errors are harmless. Only the datetime read was fatal.
+
+**2026-06-02 — Options/futures = conditioning, not training targets**
+- Decided: options & futures are predictor *conditioning* (a few daily features per underlying — ATM IV, skew, term slope), not training data. The JEPA target is the underlying price series. So per-contract OHLCV history is collected only to *derive* features, never fed raw.
+- Gotcha: historical option features require **expired-contract enumeration** (`/v3/reference/options/contracts?expired=true`), NOT the current chain — current-chain contracts haven't existed long enough to carry history. Notebook now enumerates expired contracts, keeps ATM±N strikes at ~monthly expiries, caps at `OPT_MAX_CONTRACTS`/`OPT_MAX_RUNTIME_H`.
+- Gotcha: Polygon free tier is **5 req/min per API key (account-wide), not per endpoint** — async/concurrency cannot beat it. Only fewer requests, a paid tier, or more keys help.
+- Plan: train conditioning path with **conditioning dropout (30–50%)** so it learns from the options-covered subset and degrades gracefully when absent; derive IV via Black–Scholes inversion (greeks/IV are paid).
+- Gotcha (corrected): futures are NOT `ES1!` continuous symbols on `/v2/aggs` (always empty). They live on the **dedicated Futures API** (free *Futures Basic* tier): enumerate dated single contracts via `/futures/v1/contracts?product_code=ES&type=single` then pull daily bars via `/futures/v1/aggs/{ticker}?resolution=1session` with `window_start.gte/lte` (ns-epoch `window_start`, paginates on `next_url`, no vwap → derive from `dollar_volume/volume`). Symbology = product code + CME month letter + year digit (`ESU5`).
+- Gotcha: `/futures/v1/contracts` only accepts **`sort` columns `{date, product_code, ticker}`** (dotted `.asc`/`.desc` direction). `last_trade_date` is *filterable* (`last_trade_date.gte`) but **NOT sortable** — `sort=last_trade_date.desc` returns `400 Invalid query parameter: 'sort'`. Use `sort=date.desc` (most-recently-active first). Note `client.get`'s `raise_for_status()` discards Polygon's JSON error body, so the actual reason is invisible from the traceback — reproduce the bare URL with `curl -H "Authorization: Bearer $KEY"` to read the `error` field. Polygon's futures docs now redirect to `massive.com`; the aggs endpoint's `sort=window_start.asc` is fine.
+
 **2026-06-02 — ECC setup**
 - Gotcha: GateGuard has three distinct triggers per session, each requiring facts before retrying:
   1. **First Bash** — state the user request and what the command produces
@@ -168,3 +181,14 @@ Use HTML files in `docs/` for any concept that benefits from a diagram. Referenc
 - Colab notebook sync: running the setup cell's `git pull` updates repo code and any Drive copy, but **cannot refresh the notebook tab you're viewing** (a cell can't reload its own document). To get the latest notebook, reopen via File → Open notebook → GitHub tab. The old `shutil.copy2`-to-Drive block was removed because Colab autosave races it and clobbers the synced file.
 - Setup cell guards: `IN_VSCODE = VSCODE_PID/VSCODE_CWD present` forces `IN_COLAB=False` so a local VS Code kernel never triggers the Drive mount / clone. Limitation: a *remote* Colab kernel driven from VS Code won't expose `VSCODE_PID`, so it's still treated as Colab.
 - Local dev: use `.venv` (gitignored) as the VS Code kernel; deps in `requirements.txt`. The notebook's `%pip install` cell is then a fast no-op.
+- Gotcha: Colab's bundled IPython `autoreload` extension does `from imp import reload`, but `imp` was removed in Python 3.12. Fix: shim `sys.modules['imp']` with a minimal `types.ModuleType` that delegates `reload` to `importlib.reload` before calling `%load_ext autoreload`. Both notebooks have this shim in their autoreload cell.
+
+**2026-06-03 — Dev workflow (VS Code → GitHub → Colab)**
+- Canonical loop: **edit `.py` modules in VS Code → `git push` → re-run setup cell in Colab (does `git pull`) → re-run autoreload cell → work cells pick up new code with no kernel restart.**
+- Rule: logic lives in `src/jepa_quant/*.py`. Notebooks are thin drivers (imports + calls). Keeping notebooks thin means you almost never need to reopen from the GitHub tab — only module changes flow through the loop.
+- Rule: **never edit code inside the Colab VM** (`/content/JEPA-quant`). Edits there are lost on VM recycle and will conflict on the next `git pull`. Edit on the Mac, push, pull — one direction only.
+- Rule: **never click "Copy to Drive"** on the Colab banner. Notebooks live on GitHub on purpose; a Drive copy drifts from GitHub silently.
+- Notebooks: open both from **File → Open notebook → GitHub tab**, not from Drive. "Copy to Drive" banner = healthy state, not an error.
+- Outputs (data / checkpoints / plots) write to `MyDrive/Colab Notebooks/JEPA-QUANT/data/...` via the mounted Drive. To get them on the Mac, install Google Drive for Desktop — the folder syncs automatically, no git involved.
+- Notebook edits made in Colab (cell additions etc.): use **File → Save a copy in GitHub** to commit back, then `git pull` locally. Do not use "Save to Drive" for this.
+- Do not use the Colab-in-VS-Code tunnel/extension. It adds a fragile tunnel but does not remove the git push/pull loop — code in VS Code still runs against the VM's git clone, not the local file you're viewing.
