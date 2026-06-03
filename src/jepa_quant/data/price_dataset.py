@@ -16,10 +16,9 @@ validate).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Sequence, Tuple
+from typing import Literal, Mapping, Sequence, Tuple
 
 import numpy as np
-import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -31,17 +30,24 @@ from ..config import DataConfig, JEPAConfig
 Split = Literal["train", "val"]
 
 
-def _read_price_frame(path: Path) -> pd.DataFrame:
-    """Read a price parquet robustly across pandas/pyarrow versions.
+def _read_price_frame(path: Path) -> dict[str, np.ndarray]:
+    """Read a price parquet to ``{column: ndarray}`` — pandas-free on purpose.
 
-    The files store a tz-aware datetime ``ts`` index. Letting pandas rebuild
-    that index from the parquet metadata trips a pandas<->pyarrow version bug
-    (seen on Colab with pandas 2.1.x + a newer pyarrow): ``datetime64 values
-    must have a unit specified``. We sidestep it by reading *without* the pandas
-    index metadata, ordering on the raw ``ts`` epoch in Arrow, then dropping
-    ``ts`` — the dataset needs price columns in chronological order, never the
-    timestamps themselves. Equivalent to ``read_parquet(path).sort_index()`` for
-    the columns we consume, but version-proof.
+    Two version traps motivate going straight through Arrow to NumPy and never
+    calling ``to_pandas``:
+
+    1. The files store a tz-aware datetime ``ts`` index. Letting pandas rebuild
+       it from the parquet metadata trips a pandas<->pyarrow bug (Colab,
+       pandas 2.1.x + newer pyarrow): ``datetime64 values must have a unit
+       specified``.
+    2. When ``uni2ts`` pulls NumPy below 2.0 but Colab's pandas/pyarrow wheels
+       were built against NumPy 2, the pyarrow->pandas bridge raises
+       ``expected numpy.ndarray, got numpy.ndarray`` (a C-ABI mismatch).
+       pyarrow->NumPy stays consistent, so we stop at NumPy.
+
+    Rows are ordered on the raw ``ts`` epoch in Arrow, then ``ts`` is dropped —
+    the dataset needs price columns in chronological order, never the
+    timestamps. ``_timestep_features`` reads the returned mapping by column.
     """
     table = pq.read_table(path)
     if "ts" in table.column_names:
@@ -50,14 +56,20 @@ def _read_price_frame(path: Path) -> pd.DataFrame:
         # fragile datetime->pandas conversion that raises the unit error.
         key = pc.cast(ts, pa.int64(), safe=False) if pa.types.is_timestamp(ts.type) else ts
         table = table.take(pc.sort_indices(key)).drop(["ts"])
-    return table.to_pandas(ignore_metadata=True)
+    return {name: table.column(name).to_numpy(zero_copy_only=False) for name in table.column_names}
 
 
-def _timestep_features(df: pd.DataFrame, price_cols: Sequence[str]) -> np.ndarray:
-    """[T-1, F] log-return / log-volume-change features (first row dropped)."""
+def _timestep_features(
+    df: Mapping[str, np.ndarray], price_cols: Sequence[str]
+) -> np.ndarray:
+    """[T-1, F] log-return / log-volume-change features (first row dropped).
+
+    ``df`` is any column->array mapping (the pandas-free reader's dict, or a
+    DataFrame); columns are coerced with ``np.asarray`` so both work.
+    """
     cols = []
     for col in price_cols:
-        s = df[col].astype("float64").to_numpy()
+        s = np.asarray(df[col], dtype="float64")
         if col == "volume":
             logs = np.log1p(np.clip(s, 0.0, None))
         else:
