@@ -74,7 +74,15 @@ def _timestep_features(
             logs = np.log1p(np.clip(s, 0.0, None))
         else:
             logs = np.log(np.clip(s, 1e-8, None))
-        cols.append(np.diff(logs, prepend=logs[0]))
+        # Explicit first-difference instead of np.diff(prepend=...): the prepend
+        # kwarg defaults to the np._NoValue sentinel, and a half-reloaded numpy
+        # (autoreload + the uni2ts numpy<2 downgrade on Colab) leaves a stale
+        # sentinel that leaks into the subtraction ("unsupported operand for -:
+        # '_NoValueType'"). first row = 0 (dropped below), same as prepend=logs[0].
+        diff = np.empty_like(logs)
+        diff[0] = 0.0
+        diff[1:] = logs[1:] - logs[:-1]
+        cols.append(diff)
     feats = np.stack(cols, axis=1).astype("float32")  # [T, F]
     return feats[1:]  # drop the artificial zero-return first row
 
