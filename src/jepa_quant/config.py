@@ -157,7 +157,22 @@ class TrainConfig:
     max_steps: int = 2000
     warmup_proj_steps: int = 500  # Phase 1: projections only, predictor adapters frozen
     lr_proj: float = 1e-4
-    lr_adapter: float = 3e-5  # LoRA / encoder fine-tune lr in Phase 2
+    lr_adapter: float = 3e-5  # predictor adapters (LoRA) in Phase 2 — gentle nudge of a pretrained LM
+    # Price-encoder backbone lr in Phase 2. Kept SEPARATE from lr_adapter on
+    # purpose: the ``transformer`` backend is trained FROM SCRATCH, so the 3e-5
+    # rate (meant for a pretrained LM's LoRA) barely moves random weights in a
+    # couple thousand steps — z_price stays ~random and the representation
+    # plateaus while the projection head overfits (val_jepa rises, val z_std
+    # falls). A from-scratch backbone needs a higher rate. For a frozen
+    # pretrained Moirai backbone this param group is empty and the value unused.
+    lr_encoder: float = 1e-4
+    # LR schedule (warmup -> cosine) applied per param group for stability when a
+    # from-scratch backbone switches on. Each group ramps linearly from 0 over
+    # ``lr_warmup_steps`` starting at the step it becomes active (Phase 2 for the
+    # encoder/adapters), then cosine-decays to ``lr_min_factor`` x base by
+    # ``max_steps``.
+    lr_warmup_steps: int = 100
+    lr_min_factor: float = 0.1
     weight_decay: float = 1e-2
     grad_clip: float = 1.0
     log_every: int = 25

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Encoder LR bottleneck: from-scratch price encoder starved at the LoRA rate | JEPA-Quant Log</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="container">
+
+  <a class="back-link" href="../index.html">&larr; Research Log</a>
+
+  <!-- ═══ HEADER ═══ -->
+  <header class="entry-header">
+    <h1>Encoder LR bottleneck: a from-scratch price encoder starved at the LoRA rate</h1>
+    <div class="entry-meta">
+      <span><strong>Date</strong> 2026-06-04</span>
+      <span><strong>Component</strong> Price Encoder / Training Loop</span>
+      <span><strong>Status</strong> <span class="badge badge-failed">Failed</span></span>
+      <span><strong>Time</strong> ~2 h (baseline run + diagnosis)</span>
+    </div>
+  </header>
+
+  <!-- ═══ SUMMARY ═══ -->
+  <section class="section">
+    <h2>Summary</h2>
+    <p>
+      First end-to-end JEPA + VICReg baseline on real price data (transformer price
+      encoder, Qwen2.5-1.5B + LoRA predictor). Training loss fell smoothly, but
+      <strong>validation quietly diverged from the start</strong>: <code>val_jepa</code>
+      drifted <em>up</em> (0.066 &rarr; 0.092) while held-out representation variance
+      <code>val z_std</code> drifted <em>down</em> (0.69 &rarr; 0.53) — a textbook
+      "the regularizer is satisfied on the train batch but the representation isn't
+      genuinely diverse on unseen data" signature. Root cause is <strong>not</strong>
+      collapse and <strong>not</strong> the EMA: the price encoder is the
+      <code>transformer</code> backend (randomly initialised, trained from scratch),
+      but it only unfreezes in Phase&nbsp;2 and shares one optimizer group with the
+      Qwen LoRA at <code>lr_adapter = 3e-5</code>. That rate is meant to gently nudge a
+      <em>pretrained</em> LM; it barely moves random weights in ~1.5k steps, so
+      <code>z_price</code> stays close to random features and the only thing really
+      learning is the projection head — which then overfits the train batch. Fix
+      implemented: give the encoder backbone its own higher <code>lr_encoder = 1e-4</code>
+      on a per-group warmup&rarr;cosine schedule.
+    </p>
+  </section>
+
+  <!-- ═══ HYPOTHESIS ═══ -->
+  <section class="section">
+    <h2>Hypothesis / Motivation</h2>
+    <p>
+      Expectation going in: with VICReg (V+C) holding variance up and the phased
+      schedule warming up projections before adapters, the JEPA objective should pull
+      a useful temporal representation out of the price encoder, and validation JEPA
+      should track training JEPA downward. The run was meant to be a clean baseline to
+      compare VICReg vs the soft-codebook bottleneck later.
+    </p>
+  </section>
+
+  <!-- ═══ SETUP ═══ -->
+  <section class="section">
+    <h2>Experimental Setup</h2>
+
+    <h3>Data</h3>
+    <p>
+      Per-ticker OHLCV parquets, chronological per-ticker train/val split
+      (<code>val_fraction = 0.15</code>), causal normalisation, context length
+      <code>L = 64</code>, horizon <code>H = 16</code>. Price-only path (text
+      conditioning disabled).
+    </p>
+
+    <h3>Model configuration</h3>
+    <pre><code>price_encoder : transformer (FROM SCRATCH)  d_model 256  n_layers 4  latent 256
+                freeze_backbone: false   # backbone trainable, but only in Phase 2
+predictor     : Qwen2.5-1.5B  + LoRA   r 16  alpha 32  dropout 0.05
+ema_decay     : 0.998
+regularizer   : vicreg (V + C only)    lambda_v 25.0  lambda_c 1.0  gamma 1.0
+batch_size    : 256
+lr_proj       : 1e-4
+lr_adapter    : 3e-5    # SHARED by LoRA *and* the encoder backbone  <-- the bug
+warmup_proj   : 500     max_steps 2000   jepa loss: 1 - cos(z_pred, z_target)</code></pre>
+
+    <h3>Changes from previous run</h3>
+    <ul>
+      <li>First training run on real data after the data-pipeline / numpy-stack saga (see CLAUDE.md logs).</li>
+      <li>Price encoder on the <code>transformer</code> backend (Moirai shelved on Colab).</li>
+    </ul>
+  </section>
+
+  <!-- ═══ METHODOLOGY ═══ -->
+  <section class="section">
+    <h2>Methodology</h2>
+    <ol>
+      <li>Built components and ran the phased loop to step ~1600 of 2000, logging every 25 steps and validating every 250.</li>
+      <li>Watched <code>jepa</code>, VICReg <code>v</code>/<code>c</code>, train <code>z_std_mean</code>, and the periodic <code>val_jepa</code> / <code>val z_std</code>.</li>
+      <li>On spotting the train/val divergence, read <code>ema.py</code>, <code>trainer.py</code>, <code>vicreg.py</code>, <code>jepa_loss.py</code>, <code>config.py</code>, <code>price_encoder.py</code>, and the notebook config cell to localise the cause.</li>
+      <li>Ruled out EMA (decay 0.998 is mid-range) and a frozen backbone (notebook sets <code>freeze_backbone=False</code>); traced the real constraint to the shared <code>3e-5</code> Phase-2 param group.</li>
+    </ol>
+  </section>
+
+  <!-- ═══ RESULTS ═══ -->
+  <section class="section">
+    <h2>Results</h2>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-name">val JEPA</div>
+        <div class="metric-value">0.092</div>
+        <div class="metric-note">rising (worse) from 0.066</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">val z_std</div>
+        <div class="metric-value">0.53</div>
+        <div class="metric-note">falling from 0.69</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">train z_std</div>
+        <div class="metric-value">1.02</div>
+        <div class="metric-note">pinned at gamma=1 (train only)</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">VICReg V</div>
+        <div class="metric-value">0.010</div>
+        <div class="metric-note">variance hinge satisfied</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">VICReg C</div>
+        <div class="metric-value">1.63</div>
+        <div class="metric-note">decorrelating, slow</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">steps</div>
+        <div class="metric-value">1.6 k</div>
+        <div class="metric-note">of 2000</div>
+      </div>
+    </div>
+
+    <h3>Train vs validation divergence</h3>
+    <p>
+      The tell is the gap between <code>train z_std</code> (held at ~1.0 by the VICReg
+      variance hinge on the training batch) and <code>val z_std</code> (free, and
+      shrinking). Validation JEPA rises monotonically even after the backbone unfreezes
+      at step 500 — i.e. unfreezing alone did nothing, because the rate was too low.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>step</th><th>phase</th><th>train jepa</th><th>val_jepa</th><th>val z_std</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>250</td><td>1</td><td>0.066</td><td>0.0656</td><td>0.6948</td></tr>
+          <tr><td>500</td><td>1</td><td>0.084</td><td>0.0848</td><td>0.6834</td></tr>
+          <tr><td>750</td><td>2</td><td>0.089</td><td>0.0903</td><td>0.6073</td></tr>
+          <tr><td>1000</td><td>2</td><td>0.082</td><td>0.0909</td><td>0.5794</td></tr>
+          <tr><td>1250</td><td>2</td><td>0.078</td><td>0.0915</td><td>0.5729</td></tr>
+          <tr><td>1500</td><td>2</td><td>0.082</td><td>0.0924</td><td>0.5316</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- TODO: add the loss/val curve plot here once exported:
+         <figure class="image-single">
+           <img src="../assets/images/2026-06-04_encoder-lr-bottleneck.png" alt="train vs val JEPA and val z_std over steps">
+           <figcaption>Train JEPA descends while val_jepa rises and val z_std falls.</figcaption>
+         </figure> -->
+
+    <h3>Raw output / logs (excerpt)</h3>
+    <pre><code>[    1/2000] phase=1 loss=20.3063 jepa=0.9984 v=0.7718 c=0.0136 z_std_mean=0.2285
+[  250/2000] phase=1 loss=2.8286 jepa=0.0582 v=0.0194 c=2.2861 z_std_mean=1.0005
+        val_jepa=0.0656 z_std=0.6948
+[  500/2000] phase=1 loss=2.4882 jepa=0.0836 v=0.0175 c=1.9662 z_std_mean=1.0063
+        val_jepa=0.0848 z_std=0.6834        <-- Phase 2 begins; backbone unfreezes at 3e-5
+[ 1000/2000] phase=2 loss=2.1837 jepa=0.0823 v=0.0145 c=1.7383 z_std_mean=1.0118
+        val_jepa=0.0909 z_std=0.5794
+[ 1500/2000] phase=2 loss=1.9889 jepa=0.0823 v=0.0100 c=1.6573 z_std_mean=1.0209
+        val_jepa=0.0924 z_std=0.5316
+[ 1600/2000] phase=2 loss=1.9655 jepa=0.0817 v=0.0102 c=1.6277 z_std_mean=1.0218</code></pre>
+  </section>
+
+  <!-- ═══ ANALYSIS ═══ -->
+  <section class="section">
+    <h2>Analysis &amp; Findings</h2>
+    <p>
+      Decomposing the total loss: <code>L = jepa + 25&middot;v + 1&middot;c</code>. By
+      mid-run that is roughly <code>0.08 + 0.25 + 1.6 &asymp; 1.93</code> — the
+      covariance term dominates and is grinding down slowly, while JEPA collapsed to
+      ~0.05 within 50 steps. A JEPA objective that becomes <em>this</em> easy <em>this</em>
+      fast means the prediction target carries little structure to learn: with a near-random
+      frozen-ish encoder on both the online and EMA sides, matching <code>z_pred</code> to
+      <code>z_target</code> is cheap, and VICReg's unit-variance hinge is met by the
+      projection head on the training batch alone.
+    </p>
+    <p>
+      The mechanism, precisely: <code>tunable_backbone_parameters()</code> for the
+      transformer encoder is dumped into <code>_adapter_params()</code>, which the trainer
+      put in a single optimizer group at <code>lr_adapter = 3e-5</code> alongside the LoRA
+      adapters, and that group only switches on at Phase&nbsp;2. So for the first 500 steps
+      the encoder is frozen (projection-only learning on random features), and for the
+      remaining steps it trains at a rate calibrated for a pretrained LM — far too small to
+      move a randomly-initialised 4-layer transformer. The encoder never escapes its
+      random-init basin; the projection head does all the work and overfits.
+    </p>
+    <div class="callout success">
+      VICReg, the EMA target, the phased schedule, and the data pipeline all work as
+      intended — train loss descends cleanly and the Phase 1&rarr;2 transition is stable.
+      The mechanics are sound.
+    </div>
+    <div class="callout warning">
+      The diagnosis points at the learning rate as the binding constraint, but a higher
+      encoder LR is a <em>hypothesis</em>. Rising val_jepa could also reflect too few
+      distinct market regimes in the data or VICReg failing to hold diversity off-train —
+      to be checked with a PCA/UMAP of val <code>z_price</code> after the fix.
+    </div>
+    <div class="callout danger">
+      A from-scratch price encoder trained at the LoRA rate (3e-5) does not learn a usable
+      representation: held-out JEPA degrades and held-out variance shrinks. This baseline
+      config is not a valid representation-learning run.
+    </div>
+  </section>
+
+  <!-- ═══ THOUGHT PROCESS ═══ -->
+  <section class="section">
+    <h2>Thought Process &amp; Debugging Notes</h2>
+    <p>
+      First wrong guess was EMA: a too-high decay can make the target track the context so
+      closely that matching is trivial. Checked <code>config.py</code> — decay is 0.998,
+      squarely in the healthy [0.996, 0.999] band — so that theory died. Second wrong guess
+      was "frozen random backbone": <code>freeze_backbone</code> defaults to <code>True</code>
+      (a sensible default back when the backbone was pretrained Moirai), so I assumed the
+      encoder never trained. But reading the <em>notebook</em> config cell showed it already
+      passes <code>freeze_backbone=False</code> — the backbone <em>does</em> train. The real,
+      narrower cause only became visible by following the param into the optimizer:
+      unfrozen, yes, but in the LoRA's <code>3e-5</code> group and only from Phase&nbsp;2.
+      Lesson to past self: trace the parameter all the way into its optimizer group before
+      theorising; "frozen" vs "trainable" is not binary when the learning rate is three
+      times too small.
+    </p>
+  </section>
+
+  <!-- ═══ LESSONS LEARNED ═══ -->
+  <section class="section">
+    <h2>Lessons Learned</h2>
+    <ul>
+      <li>The <code>transformer</code> price backend is trained <strong>from scratch</strong>; it must not inherit the pretrained-LM LoRA learning rate. Give it its own, higher rate.</li>
+      <li>VICReg's variance hinge is a <em>training-batch</em> constraint — <code>train z_std &asymp; 1</code> with <code>val z_std</code> falling means apparent health masking real over-fit. Always watch the held-out z_std, not just the train one.</li>
+      <li>"Unfreeze the backbone" and "let the backbone actually learn" are different claims separated by the learning rate. Verify the optimizer group, not just <code>requires_grad</code>.</li>
+      <li>A JEPA loss that crashes to near-zero in tens of steps is a warning, not a win — it usually means the target is too easy to predict.</li>
+    </ul>
+  </section>
+
+  <!-- ═══ NEXT STEPS ═══ -->
+  <section class="section">
+    <h2>Next Steps</h2>
+    <ol>
+      <li><strong>Done — implemented:</strong> split the encoder backbone into its own optimizer group with <code>lr_encoder = 1e-4</code> (separate from LoRA's <code>3e-5</code>), on a per-group warmup&rarr;cosine schedule (<code>lr_warmup_steps = 100</code>, <code>lr_min_factor = 0.1</code>) so the from-scratch backbone ramps in smoothly at Phase&nbsp;2 and decays late for stability.</li>
+      <li><strong>Re-run</strong> the baseline with the new schedule; confirm <code>val_jepa</code> now <em>decreases</em> and <code>val z_std</code> holds. Log the LR trace (<code>lr_enc</code>) that the trainer now prints.</li>
+      <li>If val still degrades with a healthy encoder LR, suspect data (too few regimes) or VICReg diversity — run PCA/UMAP on val <code>z_price</code> and compare against the soft-codebook bottleneck.</li>
+      <li>Consider whether the encoder should train from Phase 1 (no warmup gap) rather than waiting for step 500.</li>
+    </ol>
+  </section>
+
+  <footer class="site-footer">
+    JEPA-Quant &mdash; <a href="../index.html">Research Log</a> &mdash;
+    <a href="https://github.com/shreyasnat2804/JEPA-quant">GitHub</a>
+  </footer>
+
+</div>
+</body>
+</html>

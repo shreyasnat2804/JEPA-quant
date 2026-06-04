@@ -5,8 +5,11 @@ adapters), and runs the schedule from CLAUDE.md:
 
 * Phase 1 (steps < ``warmup_proj_steps``): projection layers (and regularizer
   params, e.g. codebook) only. Encoder backbone + predictor adapters frozen.
-* Phase 2 (steps >= ``warmup_proj_steps``): adapters (LoRA / transformer body /
-  top encoder layers) join at ``lr_adapter``.
+* Phase 2 (steps >= ``warmup_proj_steps``): the predictor adapters (LoRA /
+  transformer body) join at ``lr_adapter``; the price-encoder backbone joins at
+  its own ``lr_encoder`` (higher — the ``transformer`` backend trains from
+  scratch, so the LoRA rate barely moves it). Each Phase-2 group ramps in via a
+  warmup -> cosine lr schedule for stability.
 
 After every optimizer step the EMA target encoder is updated (never via the
 optimizer). The total loss is ``L_jepa + regularizer_loss``; regularization is
@@ -15,6 +18,7 @@ applied to ``z_price`` only.
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional
@@ -145,25 +149,76 @@ class JEPATrainer:
         params += list(self.c.regularizer.parameters())  # e.g. codebook codes
         return params
 
-    def _adapter_params(self) -> list[nn.Parameter]:
+    def _encoder_params(self) -> list[nn.Parameter]:
+        """Price- (and text-) encoder backbone params unfrozen in Phase 2. On
+        the ``transformer`` backend these are trained from scratch, so they get
+        their own higher lr (``lr_encoder``) rather than the LoRA rate."""
         params = list(self.c.price_encoder.tunable_backbone_parameters())
-        params += list(self.c.predictor.adapter_parameters())
         if self.c.text_encoder is not None:
             params += list(self.c.text_encoder.tunable_backbone_parameters())
         return params
 
+    def _predictor_adapter_params(self) -> list[nn.Parameter]:
+        """Predictor adapters (LoRA / transformer body) enabled in Phase 2 at
+        ``lr_adapter``."""
+        return list(self.c.predictor.adapter_parameters())
+
     def _build_optimizer(self) -> None:
-        self.adapter_params = self._adapter_params()
-        # Phase 1: adapters frozen.
-        for p in self.adapter_params:
+        tr = self.cfg.train
+        encoder_params = self._encoder_params()
+        predictor_params = self._predictor_adapter_params()
+        # Everything that joins in Phase 2 starts frozen (re-enabled in
+        # ``_enter_phase_2``). Held together only for the freeze/unfreeze toggle.
+        self.phase2_params = encoder_params + predictor_params
+        for p in self.phase2_params:
             p.requires_grad_(False)
-        groups = [{"params": self._proj_params(), "lr": self.cfg.train.lr_proj}]
-        if self.adapter_params:
-            groups.append({"params": self.adapter_params, "lr": self.cfg.train.lr_adapter})
-        self.opt = torch.optim.AdamW(groups, weight_decay=self.cfg.train.weight_decay)
+
+        # One param group per lr, plus the step each becomes active. The encoder
+        # backbone gets its own (higher) ``lr_encoder`` separate from the
+        # predictor adapters, so a from-scratch backbone actually moves while
+        # LoRA stays at its gentle ``lr_adapter``. ``_proj_params`` train from
+        # step 1; the Phase-2 groups switch on at ``warmup_proj_steps``.
+        p2 = tr.warmup_proj_steps
+        groups: list[dict] = [{"params": self._proj_params(), "lr": tr.lr_proj}]
+        activations: list[int] = [0]
+        self._group_names: list[str] = ["proj"]
+        if encoder_params:
+            groups.append({"params": encoder_params, "lr": tr.lr_encoder})
+            activations.append(p2)
+            self._group_names.append("enc")
+        if predictor_params:
+            groups.append({"params": predictor_params, "lr": tr.lr_adapter})
+            activations.append(p2)
+            self._group_names.append("ada")
+        self.opt = torch.optim.AdamW(groups, weight_decay=tr.weight_decay)
+        self.sched = torch.optim.lr_scheduler.LambdaLR(
+            self.opt, lr_lambda=[self._lr_lambda(a) for a in activations]
+        )
+
+    def _lr_lambda(self, activation_step: int):
+        """Per-group lr multiplier: 0 until the group activates, linear warmup
+        over ``lr_warmup_steps``, then cosine decay to ``lr_min_factor`` x base
+        by ``max_steps``. Guards keep it finite when ``lr_warmup_steps`` exceeds
+        ``max_steps`` (tiny test configs). ``LambdaLR`` passes the 0-based step."""
+        tr = self.cfg.train
+        warmup = max(1, tr.lr_warmup_steps)
+        floor = tr.lr_min_factor
+        decay_start = activation_step + warmup
+        decay_span = max(1, tr.max_steps - decay_start)
+
+        def fn(step: int) -> float:
+            if step < activation_step:
+                return 0.0
+            local = step - activation_step
+            if local < warmup:
+                return (local + 1) / warmup
+            progress = min(1.0, (step - decay_start) / decay_span)
+            return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return fn
 
     def _enter_phase_2(self) -> None:
-        for p in self.adapter_params:
+        for p in self.phase2_params:
             p.requires_grad_(True)
         self.phase = 2
 
@@ -233,14 +288,19 @@ class JEPATrainer:
             self.c.target_encoder.update(self.c.price_encoder)  # post-step EMA
 
             if step % cfg.log_every == 0 or step == 1:
-                record = {"step": step, "phase": self.phase, **agg}
+                lrs = {
+                    f"lr_{n}": g["lr"]
+                    for n, g in zip(self._group_names, self.opt.param_groups)
+                }
+                record = {"step": step, "phase": self.phase, **agg, **lrs}
                 self.history.append(record)
                 reg_str = " ".join(
                     f"{k.split('/')[-1]}={agg[k]:.4f}" for k in agg if k.startswith("reg/")
                 )
+                lr_str = " ".join(f"{k}={v:.2e}" for k, v in lrs.items())
                 print(
                     f"[{step:>5}/{cfg.max_steps}] phase={self.phase} "
-                    f"loss={agg['loss']:.4f} jepa={agg['jepa']:.4f} {reg_str}"
+                    f"loss={agg['loss']:.4f} jepa={agg['jepa']:.4f} {reg_str} {lr_str}"
                 )
 
             if self.val_loader is not None and step % cfg.val_every == 0:
@@ -248,6 +308,10 @@ class JEPATrainer:
                 if self.history:
                     self.history[-1]["val_jepa"] = val["val_jepa"]
                 print(f"        val_jepa={val['val_jepa']:.4f} z_std={val['val_z_std']:.4f}")
+
+            # Advance the lr schedule last, so the lr logged above is the one
+            # actually used for this step (LambdaLR set step-1's value on entry).
+            self.sched.step()
 
         return self.history
 

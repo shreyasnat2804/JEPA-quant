@@ -16,9 +16,9 @@
 
   <!-- Update these counts manually as you add entries -->
   <section class="stats">
-    <div class="stat"><span class="num">0</span><span class="label">Total</span></div>
+    <div class="stat"><span class="num">1</span><span class="label">Total</span></div>
     <div class="stat"><span class="num">0</span><span class="label">Success</span></div>
-    <div class="stat"><span class="num">0</span><span class="label">Failed</span></div>
+    <div class="stat"><span class="num">1</span><span class="label">Failed</span></div>
     <div class="stat"><span class="num">0</span><span class="label">Ongoing</span></div>
     <div class="stat"><span class="num">0</span><span class="label">Inconclusive</span></div>
   </section>
@@ -64,8 +64,12 @@
               Price Encoder · Text Encoder · Target Encoder · Predictor ·
               VICReg · Codebook · Training Loop · Data Pipeline · Evaluation
           -->
-          <tr class="empty-state">
-            <td colspan="5">No experiments logged yet &mdash; copy template.html to entries/ to begin.</td>
+          <tr>
+            <td>2026-06-04</td>
+            <td><a href="entries/2026-06-04_encoder-lr-bottleneck.html">Encoder LR bottleneck: from-scratch encoder starved at the LoRA rate</a></td>
+            <td>Price Encoder</td>
+            <td><span class="badge badge-failed">Failed</span></td>
+            <td>From-scratch transformer encoder trains only in Phase 2 at LoRA's 3e-5 &mdash; too low; z_price stays ~random, val_jepa rises while val z_std falls. Fix: own lr_encoder=1e-4 on a warmup&rarr;cosine schedule.</td>
           </tr>
         </tbody>
       </table>
