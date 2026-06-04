@@ -30,6 +30,25 @@ from ..config import DataConfig, JEPAConfig
 Split = Literal["train", "val"]
 
 
+def _to_tensor(arr: np.ndarray) -> torch.Tensor:
+    """float32 ndarray -> tensor without crossing the torch<->numpy C-API.
+
+    Third trap in the numpy<2-for-Moirai stack: Colab's preinstalled torch
+    wheel is built against NumPy 2, but uni2ts pins NumPy to 1.26. A
+    numpy-2-built ``torch.from_numpy`` then refuses a numpy-1 array with
+    ``expected np.ndarray (got numpy.ndarray)`` (the repr is identical; the
+    C-level type identity differs). We can't cheaply downgrade the CUDA torch
+    wheel, so we go through raw bytes instead: ``tobytes()`` is pure-NumPy and
+    ``torch.frombuffer`` reads bytes with no NumPy involvement, so neither
+    side's ABI is exercised. This is the only torch<->numpy crossing in the
+    hot path — once samples are tensors, the rest of training is pure torch.
+    """
+    arr = np.ascontiguousarray(arr, dtype=np.float32)
+    # bytearray (writable) avoids torch's non-writable-buffer warning.
+    flat = torch.frombuffer(bytearray(arr.tobytes()), dtype=torch.float32)
+    return flat.reshape(arr.shape)
+
+
 def _read_price_frame(path: Path) -> dict[str, np.ndarray]:
     """Read a price parquet to ``{column: ndarray}`` — pandas-free on purpose.
 
@@ -132,8 +151,8 @@ class PriceWindowDataset(Dataset):
             context = (context - mu) / sigma
             target = (target - mu) / sigma
         return {
-            "context": torch.from_numpy(np.ascontiguousarray(context)),
-            "target": torch.from_numpy(np.ascontiguousarray(target)),
+            "context": _to_tensor(context),
+            "target": _to_tensor(target),
         }
 
 

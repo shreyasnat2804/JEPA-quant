@@ -156,6 +156,12 @@ Use HTML files in `docs/` for any concept that benefits from a diagram. Referenc
 
 ### Log
 
+**2026-06-03 — Third ABI trap: torch.from_numpy rejects numpy-1 arrays (Colab torch is numpy-2-built)**
+- Symptom: `PriceWindowDataset.__getitem__` crashed in the DataLoader worker with `TypeError: expected np.ndarray (got numpy.ndarray)` at `torch.from_numpy(np.ascontiguousarray(...))`. Same C-ABI family as the pandas/pyarrow traps, but at the **torch↔numpy** boundary: Colab's preinstalled (CUDA) torch wheel is built against **numpy 2** while uni2ts pins numpy to 1.26, so `from_numpy` refuses the numpy-1 array (identical repr, different C type identity).
+- Fix (no torch reinstall): `price_dataset._to_tensor()` builds the tensor from raw bytes — `np.ascontiguousarray(...).tobytes()` (pure NumPy) → `torch.frombuffer(bytearray(...), dtype=float32).reshape(shape)` (no NumPy). Neither side's ABI is exercised. `bytearray` dodges torch's non-writable-buffer warning. Used for both `context` and `target`.
+- Why enough: it's the **only** torch↔numpy crossing in the hot path — once samples are tensors, the rest (encoders, loss, EMA) is pure torch. Codebook k-means init (sklearn) is the next likely numpy-built wall, but it's Phase-2+/optional.
+- Escape hatch unchanged: if ABI walls keep piling up, `backend='transformer'` drops uni2ts and keeps the whole Colab stack on its native numpy 2 (consistent, no FM). The numpy<2 path means patching each numpy-2-built C-extension boundary one at a time.
+
 **2026-06-03 — Training dataloader reads parquets pandas-free (two version traps)**
 - `price_dataset._read_price_frame()` reads via `pyarrow.parquet.read_table` → orders on the raw `ts` epoch in Arrow (`cast(ts,int64)` + `sort_indices`) → `drop(['ts'])` → returns `{col: ndarray}` straight from `pyarrow .to_numpy()`. **It never calls `to_pandas`/`pd.read_parquet`, never constructs a DataFrame, and the module no longer imports pandas.** `_timestep_features` accepts any `Mapping[str, ndarray]` (coerces via `np.asarray`). Do not reintroduce pandas here.
 - Trap 1 (tz-aware index): parquets store a tz-aware datetime index (`ts: timestamp[ms, tz=UTC]`, via `set_index('ts')`). Letting pandas rebuild it during `pd.read_parquet` crashes with `TypeError: datetime64 values must have a unit specified` (pyarrow `_reconstruct_index`) when pandas (2.1.x) is older than the bundled pyarrow.
