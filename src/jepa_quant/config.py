@@ -107,8 +107,16 @@ class VICRegConfig:
     augmentations)."""
 
     name: str = "vicreg"
-    lambda_v: float = 25.0  # variance weight
-    lambda_c: float = 1.0  # covariance weight
+    # The canonical VICReg defaults (λ_v=25, λ_c=1) assume an 8192-dim expander
+    # WITH the invariance term. We use latent_dim=256 and drop invariance, which
+    # breaks that balance: the C term is c=(1/d)·Σ_{i≠j}corr², so at d=256 even a
+    # well-decorrelated embedding (RMS corr ~0.08) lands c≈1.8 — ~20× the JEPA
+    # loss — and the optimizer spends ~80% of its budget on decorrelation while
+    # val_jepa regresses. Rebalanced so prediction stays the dominant signal:
+    # λ_c·c ≈ 0.09 (was 1.8), λ_v·v ≈ 0.15 (variance is already satisfied,
+    # z_std≈1.0). See research_log 2026-06-04 covariance-domination entry.
+    lambda_v: float = 10.0  # variance weight (was 25.0)
+    lambda_c: float = 0.05  # covariance weight (was 1.0)
     gamma: float = 1.0  # target std (hinge threshold)
     eps: float = 1e-4
 
