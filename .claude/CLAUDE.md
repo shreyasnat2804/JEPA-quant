@@ -2,13 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Cost is not a concern.** The user is on a monthly (flat-rate) plan, so session cost warnings are irrelevant here — do not factor spend into decisions, suggest cheaper shortcuts to save money, or wrap up early to limit cost. Optimize purely for correctness and getting the task done well.
+
 ## Architecture
 
 Three-component JEPA system. See [`docs/architecture.html`](docs/architecture.html) for the data flow diagram.
 
 | Component | Frozen? | Notes |
 |---|---|---|
-| Price Encoder (context) | Yes (initially) | Moirai preferred; unfreeze top 2 layers only if domain shift confirmed |
+| Price Encoder (context) | Yes (initially) | **Default backend = `transformer`** (lightweight, native numpy 2). Moirai is architecturally preferred but its `uni2ts` dep forces numpy<2 and is unusable on stock Colab — only run `backend='moirai'` in a clean numpy<2 env. Unfreeze top 2 layers only if domain shift confirmed |
 | Target Encoder | Always | EMA copy of price encoder — **never receives gradients** |
 | Text Encoder | Always | FinBERT / frozen Llama-3.2-1B |
 | Predictor | No — trained | Option A: lightweight transformer. Option B: Qwen2.5-1.5B + LoRA (preferred) |
@@ -152,9 +154,17 @@ Use HTML files in `docs/` for any concept that benefits from a diagram. Referenc
 
 - **Phase**: Exploration
 - **Open decision**: Anti-collapse regularization strategy — VICReg (V+C only) vs soft codebook bottleneck. Start with VICReg; add codebook if PCA/UMAP shows poor regime separation.
-- **Decided**: Drop VICReg invariance term (conflicts with JEPA temporal objective). Prefer Qwen2.5-1.5B + LoRA as predictor (Option B).
+- **Decided**: Drop VICReg invariance term (conflicts with JEPA temporal objective). Prefer Qwen2.5-1.5B + LoRA as predictor (Option B). **Price encoder default = `transformer` backend** (Moirai shelved on Colab — see 2026-06-04 log).
 
 ### Log
+
+**2026-06-04 — Switched price encoder default to `transformer`; Moirai shelved on Colab (ends the numpy saga)**
+- Decision (user): after FOUR successive numpy failures on the numpy<2-for-Moirai path, switch `PriceEncoderConfig.backend` default `moirai → transformer`. Root cause of the whole saga: `uni2ts` (Moirai) forces numpy<2, but Colab's entire prebuilt stack (torch, pandas, pyarrow, scipy, scikit-learn) is **numpy-2-built**. Forcing numpy 1.26 onto that stack is a losing battle — each library trips a *different* numpy seam, so you get a new error after each fix: (1) `datetime64 unit` (pyarrow→pandas), (2) `expected numpy.ndarray, got numpy.ndarray` (pandas make_block C-ABI), (3) same at torch↔numpy (`from_numpy`), (4) `numpy.linalg has no attribute _umath_linalg` (autoreload + half-applied downgrade corrupting numpy's C submodules). "Same root, different errors" = the rot surfaces wherever the next library happens to touch numpy.
+- The transformer backend imports **no uni2ts/lightning/torchmetrics/scipy chain**, so the whole stack stays on Colab's native numpy 2 and all four errors vanish at once. Verified: default `PriceEncoderConfig()` builds `TransformerPriceEncoder`, `uni2ts` never imported; 56/56 tests pass.
+- Changes: `config.py` default flipped (with rationale docstring); nb02 install cell now `%pip install transformers peft accelerate einops matplotlib pyarrow` (no pins, no uni2ts, no restart needed); `requirements.txt` unpinned to numpy 2, uni2ts moved to an OPTIONAL commented block.
+- Rule for any agent tempted to re-enable Moirai: **do NOT install uni2ts on Colab.** Run `backend='moirai'` only in a dedicated numpy<2 environment (local GPU / container) with the whole numeric stack pinned to its numpy-1-built releases.
+- The two earlier code workarounds (`price_dataset` pandas-free reader + `_to_tensor` frombuffer) are kept: they're version-agnostic (correct under both numpy 1 and 2) and the pandas-free reader still dodges the independent pyarrow→pandas datetime64 bug.
+- Gotcha that prolonged the saga: nb02's autoreload cell is `%autoreload 2` with NO exclusions, so a fresh `pip install` of numpy rewrites its mtimes and autoreload re-executes numpy's .py files but can't re-bind its C extensions → corrupted numpy (`_umath_linalg`/`_NoValue`). Not an issue on numpy 2 now (no downgrade), but if you ever pin a compiled lib, exclude it from autoreload (`%aimport -numpy -scipy -torch`) or restart cleanly.
 
 **2026-06-03 — Third ABI trap: torch.from_numpy rejects numpy-1 arrays (Colab torch is numpy-2-built)**
 - Symptom: `PriceWindowDataset.__getitem__` crashed in the DataLoader worker with `TypeError: expected np.ndarray (got numpy.ndarray)` at `torch.from_numpy(np.ascontiguousarray(...))`. Same C-ABI family as the pandas/pyarrow traps, but at the **torch↔numpy** boundary: Colab's preinstalled (CUDA) torch wheel is built against **numpy 2** while uni2ts pins numpy to 1.26, so `from_numpy` refuses the numpy-1 array (identical repr, different C type identity).

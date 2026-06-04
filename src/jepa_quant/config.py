@@ -22,9 +22,16 @@ TextBackend = Literal["finbert", "transformer"]
 @dataclass(frozen=True)
 class PriceEncoderConfig:
     """Context price encoder. ``moirai`` is the real foundation model;
-    ``transformer`` is a lightweight built-in that runs without downloads."""
+    ``transformer`` is a lightweight built-in that runs without downloads.
 
-    backend: PriceBackend = "moirai"
+    Default is ``transformer``: Moirai's ``uni2ts`` dependency forces
+    ``numpy<2``, which is fundamentally incompatible with Colab's numpy-2-built
+    stack (torch/pandas/pyarrow/scipy) and produced a cascade of C-ABI / numpy
+    corruption failures. The transformer backend keeps the whole stack on
+    numpy 2. To use Moirai, set ``backend='moirai'`` in a clean numpy<2
+    environment (local GPU / dedicated container), not stock Colab."""
+
+    backend: PriceBackend = "transformer"
     # Salesforce Moirai checkpoint (HF). small/base/large all supported.
     moirai_name: str = "Salesforce/moirai-1.1-R-small"
     # Number of OHLCV-derived features per timestep fed to the transformer backend.

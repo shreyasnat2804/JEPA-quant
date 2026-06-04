@@ -6,26 +6,29 @@ python-dotenv
 tqdm
 ipykernel
 
-# --- numeric stack: pinned to numpy<2 for Moirai (uni2ts) ---
-# uni2ts requires numpy<2. Anything with a C extension that touches NumPy
-# (pandas, pyarrow, scipy, scikit-learn) must be a build made AGAINST numpy 1.x
-# — numpy 2's C-ABI is not backward-compatible, so a numpy-2-built wheel fed
-# numpy-1 arrays raises "expected numpy.ndarray, got numpy.ndarray" / datetime64
-# unit errors. These are the last numpy-1-built releases (all ship cp312 wheels).
-# Keep them in lockstep; if you drop Moirai for backend='transformer', you can
-# unpin all of these and use numpy 2.
-numpy==1.26.4
-pandas==2.1.4
-pyarrow==15.0.2
-scipy==1.11.4
-scikit-learn==1.4.2
+# --- numeric stack (native numpy 2) ---
+# The default price encoder is the lightweight transformer backend, so nothing
+# here requires numpy<2. We deliberately stay on numpy 2 to match Colab's
+# prebuilt torch/pandas/pyarrow/scipy wheels (all numpy-2-built) — pinning
+# numpy<2 for Moirai's uni2ts caused a cascade of C-ABI / numpy-corruption
+# failures on Colab. Leave these unpinned (numpy 2 line).
+numpy
+pandas
+pyarrow
+scipy
+scikit-learn
 
 # --- JEPA model / training ---
-torch              # uni2ts constrains this to a numpy-1-compatible build (2.4.x)
+torch
 matplotlib
-# foundation-model backends (optional — only for backend='moirai' / 'lm' / text encoder)
-transformers>=4.44
+transformers>=4.44   # text encoder (FinBERT) + Qwen LoRA predictor
 peft>=0.11
 accelerate
 einops
-uni2ts>=1.1   # Salesforce Moirai price encoder — this is what requires numpy<2
+
+# --- Moirai price encoder (OPTIONAL — backend='moirai') ---
+# uni2ts requires numpy<2 and is INCOMPATIBLE with the numpy-2 stack above and
+# with stock Colab. Only install it in a clean, dedicated numpy<2 environment
+# (local GPU / container), and pin the whole numeric stack to numpy<2 there:
+#   numpy==1.26.4 pandas==2.1.4 pyarrow==15.0.2 scipy==1.11.4 scikit-learn==1.4.2
+# uni2ts>=1.1
