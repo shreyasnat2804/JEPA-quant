@@ -2,9 +2,59 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Cost is not a concern.** The user is on a monthly (flat-rate) plan, so session cost warnings are irrelevant here — do not factor spend into decisions, suggest cheaper shortcuts to save money, or wrap up early to limit cost. Optimize purely for correctness and getting the task done well.
+> **Cost is not a concern.** The user is on a monthly (flat-rate) plan, so session cost warnings are irrelevant here -- do not factor spend into decisions, suggest cheaper shortcuts to save money, or wrap up early to limit cost. Optimize purely for correctness and getting the task done well.
 
-> **Colab compute budget: 250 compute units/month.** Treat GPU-hours as a limited resource — prefer efficient training runs, avoid redundant full re-trains, and don't burn units on debugging that can be done CPU-side first.
+> **Colab compute budget: 250 compute units/month.** Treat GPU-hours as a limited resource -- prefer efficient training runs, avoid redundant full re-trains, and don't burn units on debugging that can be done CPU-side first.
+
+---
+
+## Research Workflow (Mandatory for All Notebooks and Experiments)
+
+Every notebook and experiment script MUST open with a structured header cell using this exact template, filled in BEFORE any code runs:
+
+```
+QUESTION: the single thing this experiment decides
+H1 / H0: the hypothesis and its null, stated so they are distinguishable by the result
+MEASURED TARGET: exact metric, exact dataset/split, exact computation (no vague "val_jepa" --
+  say which batches, how many, what seed)
+DECISION RULE: numeric thresholds. e.g. "if shuffled cosine >= 0.8 * true cosine, conclude degenerate"
+PRIORS / ASSUMPTIONS: what we believe going in and why, what the inputs are assumed to be
+  (raw vs returns), known confounds
+FALSIFIER: the observation that would kill H1
+RESULT: (filled after running)
+DECISION + NEXT ACTION: (filled after running)
+```
+
+Inline, every nontrivial implementation choice gets a one-line reason in a comment or markdown cell:
+why this normalization, why this baseline, why this threshold. No silent decisions.
+
+Reusable logic goes in modules under `src/jepa_quant/eval/`, not buried in notebook cells.
+Notebooks are thin drivers: import, call, print numbers, fill RESULT and DECISION.
+
+---
+
+## Metric Discipline
+
+**The primary metric is the downstream linear probe, not val_jepa.**
+
+val_jepa = 1 - cosine_similarity(z_pred, z_target) is an intrinsic metric. It can be low
+(high cosine similarity) via EMA collapse: if the projection heads of the context encoder
+and EMA target encoder converge to similar mappings regardless of input window, then every
+z_pred and z_target pair will be cosine-similar, and val_jepa will be low even when the
+representation carries no temporal structure.
+
+**Before reporting any val_jepa improvement as progress, you MUST:**
+1. Run `shuffled_target_control` (in `src/jepa_quant/eval/diagnostics.py`). Compute
+   ratio = shuffled_cosine_mean / true_cosine_mean. If ratio >= 0.8, the improvement is
+   degenerate and should not be reported as progress.
+2. Compare against the untrained baseline (fresh random init, same arch). If trained
+   val_jepa >= untrained val_jepa, training did not help.
+
+**No new training run is justified until a shuffled-target control and the relevant baselines
+exist for whatever is being claimed.** A new architecture change or hyperparameter sweep that
+cannot beat the shuffled control is not a forward step.
+
+---
 
 ## Architecture
 
@@ -12,12 +62,14 @@ Three-component JEPA system. See [`docs/architecture.html`](docs/architecture.ht
 
 | Component | Frozen? | Notes |
 |---|---|---|
-| Price Encoder (context) | Yes (initially) | **Default backend = `transformer`** (lightweight, native numpy 2). Moirai is architecturally preferred but its `uni2ts` dep forces numpy<2 and is unusable on stock Colab — only run `backend='moirai'` in a clean numpy<2 env. Unfreeze top 2 layers only if domain shift confirmed |
-| Target Encoder | Always | EMA copy of price encoder — **never receives gradients** |
+| Price Encoder (context) | Yes (initially) | **Default backend = `transformer`** (lightweight, native numpy 2). Moirai is architecturally preferred but its `uni2ts` dep forces numpy<2 and is unusable on stock Colab. Only run `backend='moirai'` in a clean numpy<2 env. Unfreeze top 2 layers only if domain shift confirmed. |
+| Target Encoder | Always | EMA copy of price encoder -- **never receives gradients** |
 | Text Encoder | Always | FinBERT / frozen Llama-3.2-1B |
-| Predictor | No — trained | Option A: lightweight transformer. Option B: Qwen2.5-1.5B + LoRA (preferred) |
+| Predictor | No -- trained | Option A: lightweight transformer. Option B: Qwen2.5-1.5B + LoRA (preferred) |
 
 **Predictor wiring (Option B):** `z_price` and `z_text` are projected into the LM's embedding dim and prepended as prefix tokens. A learned query token is appended; its final hidden state is `z_pred`.
+
+**Input pipeline:** Raw OHLCV parquets -> log-returns (`_timestep_features` in price_dataset.py) -> per-sample normalize by context window mean/std (causal: stats from context only, applied to both context and target). Inputs to the encoder are normalized log-returns, NOT raw prices. Price level does NOT enter the encoder.
 
 ---
 
@@ -32,118 +84,145 @@ Financial latents and LM embedding spaces have incompatible scale and geometry. 
 Standard VICReg has three terms: variance (V), invariance (I), covariance (C). Use only V + C. The invariance term conflicts with the JEPA temporal loss because context and target windows are different time slices, not augmentations.
 
 **3. EMA target encoder receives zero gradients.**
-`target_params = ema_decay * target_params + (1 - ema_decay) * context_params` — update happens after each step, outside the optimizer. If gradients accidentally flow through it, the self-supervised signal collapses.
+`target_params = ema_decay * target_params + (1 - ema_decay) * context_params` -- update happens after each step, outside the optimizer. If gradients accidentally flow through it, the self-supervised signal collapses.
 
-**4. VICReg requires batch size ≥ 256.**
+**4. VICReg requires batch size >= 256.**
 Covariance estimates are noisy below this. Use gradient accumulation if GPU memory is the constraint.
 
 **5. Initialize codebook with k-means, not randomly.**
 Run a frozen forward pass, collect `z_price` embeddings, run k-means, use centroids as initial codebook vectors. Random init causes codebook collapse (many dead vectors).
 
 **6. Warm up projection layers before enabling LoRA (Option B predictor).**
-Steps 1–500: train projections only, freeze LoRA. Steps 500+: enable LoRA at `3e-5` lr, projections at `1e-4`.
+Steps 1-500: train projections only, freeze LoRA. Steps 500+: enable LoRA at `lr_adapter` lr, projections at `lr_proj`.
 
 ---
 
 ## Loss
 
 ```
-L_total = L_jepa + λ_v * V(z_price) + λ_c * C(z_price)
+L_total = L_jepa + lambda_v * V(z_price) + lambda_c * C(z_price)
 ```
 - `L_jepa = 1 - cosine_similarity(z_pred, z_target)` (or L2/d)
-- `λ_v = 25.0`, `λ_c = 1.0` (starting values)
+- Current defaults: `lambda_v = 10.0`, `lambda_c = 0.05` (see config.py -- the original canonical VICReg
+  values of 25/1 assumed an 8192-dim expander WITH the invariance term; at d=256 without invariance,
+  lambda_c=1.0 made covariance ~80% of the loss and suppressed the JEPA signal)
 - Apply regularization to `z_price` only, not `z_pred` or `z_text`
 
 If using codebook: replace `z_price` with `z_codebook` and add:
 ```
-L_total += λ_commit * ||z_price - sg(z_codebook)||²
+L_total += lambda_commit * ||z_price - sg(z_codebook)||^2
 ```
 
 ---
 
 ## Training Phases
 
-| Phase | Steps | What's active |
+| Phase | Steps | What is active |
 |---|---|---|
-| 1 | 1–500 | Projection layers only. Everything else frozen. |
-| 2 | 500+ | Projection layers + LoRA adapters. JEPA loss + regularization. |
-| 3 | Optional | Unfreeze top 2 price encoder layers at 0.1× lr if val loss plateaus. |
+| 1 | 1-500 | Projection layers only. Backbone + predictor adapters frozen. |
+| 2 | 500+ | Projection layers + predictor adapters (LoRA/transformer body) at `lr_adapter`. Price encoder backbone at `lr_encoder` (separate param group). |
+| 3 | Optional | Unfreeze top 2 price encoder layers at 0.1x lr if val loss plateaus. |
+
+Each Phase-2 group ramps in via a warmup->cosine lr schedule (default: 200-step warmup, cosine to `lr_min_factor` * base by `max_steps`).
+
+---
+
+## Core Findings (as of 2026-06-05)
+
+**Every attempt to train the price encoder backbone inside the JEPA loop diverges in BOTH train and val together.** Root cause: the EMA target encoder lags the moving backbone. When the backbone updates, the context representation shifts but the target representation (EMA copy) trails behind by ~1/(1-decay) steps. Context and target are already different time slices (unlike I-JEPA where they are two views of one input), so there is no "same input" anchor to prevent drift. Result: jepa loss rises monotonically as the predictor tries to track a moving target.
+
+Evidence from training runs 1-4:
+- Run 1: lr_encoder=3e-5 (shared) -> val_jepa plateaued at 0.092, encoder barely moved
+- Run 2: lr_encoder=1e-4 -> val_jepa rose monotonically to 0.147 (encoder drifted too fast for EMA window of 500 steps)
+- Run 3: lr_encoder=5e-5, ema_decay=0.999 -> first val_jepa decrease (0.0953->0.0945) at step 2000, but cosine schedule had already hit its floor
+- Run 4-5: continued drift or premature early stopping
+
+**Frozen-backbone runs are best so far (val_jepa 0.064)**, but suspected degenerate until Stage 0 diagnostics clear it. The suspicion: a frozen random backbone + trained projection head + EMA target encoder with the same projection head converge to similar mappings for any input window (EMA collapse), giving artificially low val_jepa without genuine temporal prediction.
+
+**Next branch (determined by Stage 0):**
+- If Stage 0 says degenerate (shuffled ratio >= 0.8): investigate frozen PRETRAINED backbone (Moirai/TimesFM in a clean numpy<2 env) or reconstruction pretraining before JEPA. Do NOT continue with a random frozen backbone.
+- If Stage 0 says temporal (ratio < 0.8): run Stage 1 linear probe to quantify downstream value of z_price. The probe becomes the primary progress metric.
+
+---
+
+## Open Decisions
+
+1. **Anti-collapse regularization:** VICReg (V+C only) vs soft codebook bottleneck. Currently using VICReg. Add codebook if PCA/UMAP shows poor regime separation.
+
+2. **Backbone quality:** The transformer backend is a from-scratch random initialization. No inductive bias from financial data. If Stage 0 says degenerate, the most likely fix is a pretrained backbone (Moirai or TimesFM), which requires a dedicated numpy<2 environment (not stock Colab). See 2026-06-04 log.
+
+3. **Stage 0 result TBD:** Run nb00_diagnostics.ipynb on nb03_best.pt. The shuffled_target_control verdict gates everything else.
 
 ---
 
 ## Available ECC Tools (globally installed in ~/.claude/)
 
-ECC (Everything Claude Code) is installed globally. Use these for this project:
-
 **Agents** (invoke via `Agent` tool with `subagent_type`):
-- `mle-reviewer` — ML code review: architecture, training loops, loss functions
-- `code-reviewer` — General code review
-- `python-reviewer` — Python/PEP 8/type hints
-- `security-reviewer` — Security audit
-- `architect` — System design decisions
-- `planner` — Task breakdown before implementation
+- `mle-reviewer` -- ML code review: architecture, training loops, loss functions
+- `code-reviewer` -- General code review
+- `python-reviewer` -- Python/PEP 8/type hints
+- `security-reviewer` -- Security audit
+- `architect` -- System design decisions
+- `planner` -- Task breakdown before implementation
 
 **Skills most relevant here** (invoke via `/skill-name`):
-- `/python-review` — Python code review
-- `/tdd-workflow` — Test-driven development loop
-- `/eval-harness` — Model evaluation pipeline
-- `/security-review` — Security checklist
-- `/mle-workflow` — Full ML experiment workflow
-- `/continuous-learning-v2` — Pattern extraction after sessions
-- `/plan` — Feature planning with risk assessment
-- `/code-review` — Review uncommitted changes
-
-**Active hooks** (run automatically, no action needed):
-- `SessionStart` — loads previous context
-- `PreToolUse` — secret detection, config protection, fact-forcing gate (GateGuard blocks first edit per file; present facts then retry)
-- `PostToolUse` — quality gate after file edits, context monitoring
-- `Stop` — session state persistence, pattern evaluation, cost tracking
-
-ECC scripts live at `~/.claude/scripts/` and are resolved automatically by hooks.
+- `/python-review` -- Python code review
+- `/code-review` -- Review uncommitted changes
 
 ---
 
 ## File Structure
 
 ```
-jepa_quant/
+src/jepa_quant/
+  config.py                    # All dataclasses + JEPAConfig; build_components() reads from here
   encoders/
-    price_encoder.py       # Moirai/TimesFM wrapper + projection head
-    text_encoder.py        # FinBERT/Llama wrapper + projection head
-    target_encoder.py      # EMA wrapper — no grad, post-step update only
+    price_encoder.py           # TransformerPriceEncoder + MoiraiPriceEncoder; forward: [B,L,F] -> [B,D]
+    projection.py              # ProjectionHead (Linear->GELU->Linear->LayerNorm); NEVER omit the LN
+    target_encoder.py          # EMA wrapper; forward: [B,H,F] -> [B,D]; update() post-step only
+    text_encoder.py            # FinBERT/Llama wrapper
   predictor/
+    base.py                    # Predictor interface: forward(z_price, z_text) -> z_pred
     transformer_predictor.py   # Option A
     lm_predictor.py            # Option B (preferred)
   regularization/
-    vicreg.py              # V + C terms only
-    codebook.py            # Soft codebook + commitment loss
+    base.py                    # Regularizer interface + registry
+    vicreg.py                  # V + C terms only (invariance intentionally dropped)
+    codebook.py                # Soft codebook + commitment loss
   training/
-    jepa_loss.py
-    train.py               # Phased training loop
-    ema.py
+    jepa_loss.py               # jepa_loss(z_pred, z_target, kind) -> scalar; 1 - cosine by default
+    trainer.py                 # JEPATrainer + build_components + resolve_device
+    ema.py                     # ema_update(target, source, decay)
+    plot.py                    # Training history plotting utilities
   data/
-    price_dataset.py
+    price_dataset.py           # PriceWindowDataset; pandas-free parquet reader; log-return features
     text_dataset.py
     conditioning_dataset.py
+  eval/
+    __init__.py
+    diagnostics.py             # Stage 0: shuffled_target_control, compute_baselines, collapse_audit,
+                               #   level_dependence_test, regime_clustering; all return dicts of numbers
+    linear_probe.py            # Stage 1 (TBD): frozen encoder -> linear head -> downstream target
 ```
 
 ---
 
 ## Training Diagnostics to Log
 
-- Codebook utilization (fraction of active vectors per batch) — if <50%, reduce `λ_commit`
-- Per-dimension std of `z_price` — variance collapse early warning
+- Codebook utilization (fraction of active vectors per batch) -- if <50%, reduce `lambda_commit`
+- Per-dimension std of `z_price` -- variance collapse early warning
 - JEPA loss vs regularization loss breakdown
+- **Shuffled-target control at every val checkpoint** -- not just jepa loss
 
 ---
 
 ## Self-Improvement Protocol
 
-After completing any non-trivial task, update this file if any of the following apply — **only if every future agent in this codebase would need to know it**:
+After completing any non-trivial task, update this file if any of the following apply -- **only if every future agent in this codebase would need to know it**:
 
 1. **Gotchas encountered**: silent failures, wrong assumptions about the architecture, hyperparameter interactions that weren't obvious
 2. **Loops that required user intervention**: if you got stuck and the user had to redirect you, record what the trap was and how to avoid it
-3. **Filter before writing**: ask "will every agent working in this codebase need to know this?" — if no, do not add it
+3. **Filter before writing**: ask "will every agent working in this codebase need to know this?" -- if no, do not add it
 4. **Update Project Status below** to reflect the current phase, what's been decided, and what's still open
 
 Use HTML files in `docs/` for any concept that benefits from a diagram. Reference them from this file.
@@ -154,73 +233,59 @@ Use HTML files in `docs/` for any concept that benefits from a diagram. Referenc
 
 > **Maintained by the self-improvement protocol. Update this after each task.**
 
-- **Phase**: Exploration
-- **Open decision**: Anti-collapse regularization strategy — VICReg (V+C only) vs soft codebook bottleneck. Start with VICReg; add codebook if PCA/UMAP shows poor regime separation.
-- **Decided**: Drop VICReg invariance term (conflicts with JEPA temporal objective). Prefer Qwen2.5-1.5B + LoRA as predictor (Option B). **Price encoder default = `transformer` backend** (Moirai shelved on Colab — see 2026-06-04 log).
+- **Phase**: Diagnostics (Stage 0) -- evaluating existing checkpoint before any new training
+- **Primary metric**: Downstream linear probe (Stage 1). val_jepa is secondary and must always be reported alongside its shuffled-target control ratio.
+- **Open decision**: Stage 0 shuffled-target control result on nb03_best.pt (TBD -- run nb00_diagnostics.ipynb)
+- **Decided**: Drop VICReg invariance term. Prefer Qwen2.5-1.5B + LoRA as predictor (Option B). Price encoder default = `transformer` backend. No new training run until Stage 0 clears the degeneracy question.
 
 ### Log
 
-**2026-06-04 — LM predictor (`backend='lm'`) blows up on Colab's preinstalled torchao 0.10.0**
-- Symptom: `build_components(cfg)` with `USE_FOUNDATION_MODELS=True` crashes in `LMPredictor.__init__` at `get_peft_model(base, lora)` → `ImportError: Found an incompatible version of torchao. Found version 0.10.0, but only versions above 0.16.0 are supported`. Not our code — it's PEFT's LoRA dispatch.
+**2026-06-05 -- Stage 0 diagnostics module + research workflow introduced**
+- Added `src/jepa_quant/eval/diagnostics.py` with five diagnostic functions: shuffled_target_control, compute_baselines, collapse_audit, level_dependence_test, regime_clustering.
+- Added `notebooks/nb00_diagnostics.ipynb` as thin driver; all logic in modules.
+- CLAUDE.md rewritten to mandate the QUESTION/H1/H0/MEASURED TARGET/DECISION RULE/PRIORS/FALSIFIER/RESULT/DECISION template for all notebooks.
+- Primary metric changed from val_jepa to downstream linear probe (Stage 1, TBD).
+- Documented core finding: every attempt to unfreeze the backbone in the JEPA loop diverges in both train and val. Frozen-backbone best so far but suspected degenerate.
+- Mismatch corrected in CLAUDE.md: lambda_v=25/lambda_c=1 (old canonical values) replaced with actual defaults 10.0/0.05. File `train.py` corrected to `trainer.py`.
+
+**2026-06-04 -- LM predictor (`backend='lm'`) blows up on Colab's preinstalled torchao 0.10.0**
+- Symptom: `build_components(cfg)` with `USE_FOUNDATION_MODELS=True` crashes in `LMPredictor.__init__` at `get_peft_model(base, lora)` -> `ImportError: Found an incompatible version of torchao. Found version 0.10.0, but only versions above 0.16.0 are supported`. Not our code -- it's PEFT's LoRA dispatch.
 - Root cause: Colab preinstalls `torchao==0.10.0`. Recent PEFT's `is_torchao_available()` **raises** (instead of returning `False`) when it finds a torchao below its 0.16.0 minimum. PEFT calls it from `dispatch_torchao` while building every LoRA layer, so the build dies even though we never use torchao quantization (plain LoRA on bf16 `Linear`).
-- Fix (nb02 install cell, cell-6): add `%pip uninstall -q -y torchao` after the install. With torchao absent, `importlib.util.find_spec("torchao")` returns `None` → `is_torchao_available()` returns `False` → the torchao dispatcher is skipped cleanly. Uninstalling beats upgrading: bumping torchao to ≥0.16.0 would drag torch/ABI churn onto Colab's numpy-2 stack.
-- Operational gotcha: if you already ran the failed `build_components`, PEFT is imported into the kernel. After re-running the uninstall cell, do **Runtime → Restart session** (the uninstall persists on disk across restart since the VM isn't recycled), then run from the config cell down — guarantees no stale peft/torchao in `sys.modules`. A fresh top-to-bottom run (cell-6 before any peft import) doesn't need the restart.
+- Fix (nb02 install cell, cell-6): add `%pip uninstall -q -y torchao` after the install. With torchao absent, `importlib.util.find_spec("torchao")` returns `None` -> `is_torchao_available()` returns `False` -> the torchao dispatcher is skipped cleanly. Uninstalling beats upgrading: bumping torchao to >=0.16.0 would drag torch/ABI churn onto Colab's numpy-2 stack.
+- Operational gotcha: if you already ran the failed `build_components`, PEFT is imported into the kernel. After re-running the uninstall cell, do **Runtime -> Restart session** (the uninstall persists on disk across restart since the VM isn't recycled), then run from the config cell down -- guarantees no stale peft/torchao in `sys.modules`. A fresh top-to-bottom run (cell-6 before any peft import) doesn't need the restart.
 - Rule: any agent enabling a PEFT/transformers backend on Colab should expect Colab's preinstalled ML libs (torchao, and historically torchvision/torchaudio) to be *older* than what current PEFT/transformers demand. Prefer removing the unused offender over version-bumping into ABI churn.
 
-**2026-06-04 — Switched price encoder default to `transformer`; Moirai shelved on Colab (ends the numpy saga)**
-- Decision (user): after FOUR successive numpy failures on the numpy<2-for-Moirai path, switch `PriceEncoderConfig.backend` default `moirai → transformer`. Root cause of the whole saga: `uni2ts` (Moirai) forces numpy<2, but Colab's entire prebuilt stack (torch, pandas, pyarrow, scipy, scikit-learn) is **numpy-2-built**. Forcing numpy 1.26 onto that stack is a losing battle — each library trips a *different* numpy seam, so you get a new error after each fix: (1) `datetime64 unit` (pyarrow→pandas), (2) `expected numpy.ndarray, got numpy.ndarray` (pandas make_block C-ABI), (3) same at torch↔numpy (`from_numpy`), (4) `numpy.linalg has no attribute _umath_linalg` (autoreload + half-applied downgrade corrupting numpy's C submodules). "Same root, different errors" = the rot surfaces wherever the next library happens to touch numpy.
-- The transformer backend imports **no uni2ts/lightning/torchmetrics/scipy chain**, so the whole stack stays on Colab's native numpy 2 and all four errors vanish at once. Verified: default `PriceEncoderConfig()` builds `TransformerPriceEncoder`, `uni2ts` never imported; 56/56 tests pass.
-- Changes: `config.py` default flipped (with rationale docstring); nb02 install cell now `%pip install transformers peft accelerate einops matplotlib pyarrow` (no pins, no uni2ts, no restart needed); `requirements.txt` unpinned to numpy 2, uni2ts moved to an OPTIONAL commented block.
+**2026-06-04 -- Switched price encoder default to `transformer`; Moirai shelved on Colab (ends the numpy saga)**
+- Decision (user): after FOUR successive numpy failures on the numpy<2-for-Moirai path, switch `PriceEncoderConfig.backend` default `moirai -> transformer`. Root cause of the whole saga: `uni2ts` (Moirai) forces numpy<2, but Colab's entire prebuilt stack (torch, pandas, pyarrow, scipy, scikit-learn) is **numpy-2-built**. Forcing numpy 1.26 onto that stack is a losing battle -- each library trips a *different* numpy seam, so you get a new error after each fix.
+- The transformer backend imports **no uni2ts/lightning/torchmetrics/scipy chain**, so the whole stack stays on Colab's native numpy 2 and all four errors vanish at once.
 - Rule for any agent tempted to re-enable Moirai: **do NOT install uni2ts on Colab.** Run `backend='moirai'` only in a dedicated numpy<2 environment (local GPU / container) with the whole numeric stack pinned to its numpy-1-built releases.
-- The two earlier code workarounds (`price_dataset` pandas-free reader + `_to_tensor` frombuffer) are kept: they're version-agnostic (correct under both numpy 1 and 2) and the pandas-free reader still dodges the independent pyarrow→pandas datetime64 bug.
-- Gotcha that prolonged the saga: nb02's autoreload cell is `%autoreload 2` with NO exclusions, so a fresh `pip install` of numpy rewrites its mtimes and autoreload re-executes numpy's .py files but can't re-bind its C extensions → corrupted numpy (`_umath_linalg`/`_NoValue`). Not an issue on numpy 2 now (no downgrade), but if you ever pin a compiled lib, exclude it from autoreload (`%aimport -numpy -scipy -torch`) or restart cleanly.
 
-**2026-06-03 — Third ABI trap: torch.from_numpy rejects numpy-1 arrays (Colab torch is numpy-2-built)**
-- Symptom: `PriceWindowDataset.__getitem__` crashed in the DataLoader worker with `TypeError: expected np.ndarray (got numpy.ndarray)` at `torch.from_numpy(np.ascontiguousarray(...))`. Same C-ABI family as the pandas/pyarrow traps, but at the **torch↔numpy** boundary: Colab's preinstalled (CUDA) torch wheel is built against **numpy 2** while uni2ts pins numpy to 1.26, so `from_numpy` refuses the numpy-1 array (identical repr, different C type identity).
-- Fix (no torch reinstall): `price_dataset._to_tensor()` builds the tensor from raw bytes — `np.ascontiguousarray(...).tobytes()` (pure NumPy) → `torch.frombuffer(bytearray(...), dtype=float32).reshape(shape)` (no NumPy). Neither side's ABI is exercised. `bytearray` dodges torch's non-writable-buffer warning. Used for both `context` and `target`.
-- Why enough: it's the **only** torch↔numpy crossing in the hot path — once samples are tensors, the rest (encoders, loss, EMA) is pure torch. Codebook k-means init (sklearn) is the next likely numpy-built wall, but it's Phase-2+/optional.
-- Escape hatch unchanged: if ABI walls keep piling up, `backend='transformer'` drops uni2ts and keeps the whole Colab stack on its native numpy 2 (consistent, no FM). The numpy<2 path means patching each numpy-2-built C-extension boundary one at a time.
+**2026-06-03 -- Third ABI trap: torch.from_numpy rejects numpy-1 arrays (Colab torch is numpy-2-built)**
+- Fix: `price_dataset._to_tensor()` builds the tensor from raw bytes -- `np.ascontiguousarray(...).tobytes()` (pure NumPy) -> `torch.frombuffer(bytearray(...), dtype=float32).reshape(shape)` (no NumPy ABI). Used for both `context` and `target`.
 
-**2026-06-03 — Training dataloader reads parquets pandas-free (two version traps)**
-- `price_dataset._read_price_frame()` reads via `pyarrow.parquet.read_table` → orders on the raw `ts` epoch in Arrow (`cast(ts,int64)` + `sort_indices`) → `drop(['ts'])` → returns `{col: ndarray}` straight from `pyarrow .to_numpy()`. **It never calls `to_pandas`/`pd.read_parquet`, never constructs a DataFrame, and the module no longer imports pandas.** `_timestep_features` accepts any `Mapping[str, ndarray]` (coerces via `np.asarray`). Do not reintroduce pandas here.
-- Trap 1 (tz-aware index): parquets store a tz-aware datetime index (`ts: timestamp[ms, tz=UTC]`, via `set_index('ts')`). Letting pandas rebuild it during `pd.read_parquet` crashes with `TypeError: datetime64 values must have a unit specified` (pyarrow `_reconstruct_index`) when pandas (2.1.x) is older than the bundled pyarrow.
-- Trap 2 (NumPy C-ABI): `uni2ts` requires `numpy<2`, so `%pip install -r requirements.txt` downgrades Colab's NumPy to 1.26.4 — but Colab's prebuilt **pandas/pyarrow wheels are built against NumPy 2**. Handing NumPy-1 arrays to those C extensions raises `TypeError: Argument 'values' has incorrect type (expected numpy.ndarray, got numpy.ndarray)` inside pandas `make_block`. **pyarrow->NumPy stays consistent** (pyarrow produced the array pandas rejected), which is why the pandas-free path works. This ABI skew still breaks *any* other pandas use on that Colab session (e.g. the ingestion notebook) — the real cure is keeping NumPy 2 (don't install `uni2ts` unless using the Moirai backend; it's optional).
-- Note: the dep-conflict wall and `autoreload of numpy`/`numpy.ma` errors on Colab are noisy but non-blocking.
+**2026-06-03 -- Training dataloader reads parquets pandas-free (two version traps)**
+- `price_dataset._read_price_frame()` reads via `pyarrow.parquet.read_table` -> orders on the raw `ts` epoch in Arrow -> returns `{col: ndarray}` straight from `pyarrow .to_numpy()`. **Never calls `to_pandas`. Do not reintroduce pandas here.**
 
-**2026-06-03 — numpy<2 stack pinned for Moirai; notebooks install INLINE (not requirements.txt)**
-- Gotcha (big one): **the notebooks do NOT `pip install -r requirements.txt`** — each has its own inline `%pip install` list (nb 02 cell 5, nb 01). Editing `requirements.txt` alone changes nothing on Colab. Pin versions in the **notebook install cell** (and keep `requirements.txt` in sync for the local `.venv`).
-- Root cause of the whole 2026-06-03 error chain: default `price_encoder.backend='moirai'` → `uni2ts` → requires **numpy<2**, which downgrades Colab's numpy to 1.26.4, but `pyarrow`/`scikit-learn` (left unpinned) stayed at Colab's **numpy-2-built** wheels. numpy-2-built C extensions can't accept numpy-1 arrays → the datetime64-unit, make_block, and `_NoValueType` errors.
-- Resolution (decided): keep Moirai, pin the **entire compiled numeric stack** to its last numpy-1-built releases so they agree: `numpy==1.26.4, pandas==2.1.4, pyarrow==15.0.2, scipy==1.11.4, scikit-learn==1.4.2` (torch left to uni2ts, which pins ~2.4.x). After installing, **Runtime → Restart** so the numpy-1 wheels load before anything imports numpy (also clears the autoreload-corrupted numpy state).
-- Alternative if you ever drop Moirai: set `backend='transformer'`, remove `uni2ts` + all the numpy pins, keep Colab's numpy 2 (simpler, no FM).
+**2026-06-03 -- numpy<2 stack pinned for Moirai; notebooks install INLINE (not requirements.txt)**
+- Gotcha (big one): **the notebooks do NOT `pip install -r requirements.txt`** -- each has its own inline `%pip install` list. Editing `requirements.txt` alone changes nothing on Colab. Pin versions in the **notebook install cell**.
 
-**2026-06-02 — Options/futures = conditioning, not training targets**
-- Decided: options & futures are predictor *conditioning* (a few daily features per underlying — ATM IV, skew, term slope), not training data. The JEPA target is the underlying price series. So per-contract OHLCV history is collected only to *derive* features, never fed raw.
-- Gotcha: historical option features require **expired-contract enumeration** (`/v3/reference/options/contracts?expired=true`), NOT the current chain — current-chain contracts haven't existed long enough to carry history. Notebook now enumerates expired contracts, keeps ATM±N strikes at ~monthly expiries, caps at `OPT_MAX_CONTRACTS`/`OPT_MAX_RUNTIME_H`.
-- Gotcha: Polygon free tier is **5 req/min per API key (account-wide), not per endpoint** — async/concurrency cannot beat it. Only fewer requests, a paid tier, or more keys help.
-- Plan: train conditioning path with **conditioning dropout (30–50%)** so it learns from the options-covered subset and degrades gracefully when absent; derive IV via Black–Scholes inversion (greeks/IV are paid).
-- Gotcha (corrected): futures are NOT `ES1!` continuous symbols on `/v2/aggs` (always empty). They live on the **dedicated Futures API** (free *Futures Basic* tier): enumerate dated single contracts via `/futures/v1/contracts?product_code=ES&type=single` then pull daily bars via `/futures/v1/aggs/{ticker}?resolution=1session` with `window_start.gte/lte` (ns-epoch `window_start`, paginates on `next_url`, no vwap → derive from `dollar_volume/volume`). Symbology = product code + CME month letter + year digit (`ESU5`).
-- Gotcha: `/futures/v1/contracts` only accepts **`sort` columns `{date, product_code, ticker}`** (dotted `.asc`/`.desc` direction). `last_trade_date` is *filterable* (`last_trade_date.gte`) but **NOT sortable** — `sort=last_trade_date.desc` returns `400 Invalid query parameter: 'sort'`. Use `sort=date.desc` (most-recently-active first). Note `client.get`'s `raise_for_status()` discards Polygon's JSON error body, so the actual reason is invisible from the traceback — reproduce the bare URL with `curl -H "Authorization: Bearer $KEY"` to read the `error` field. Polygon's futures docs now redirect to `massive.com`; the aggs endpoint's `sort=window_start.asc` is fine.
+**2026-06-02 -- Options/futures = conditioning, not training targets**
+- Decided: options & futures are predictor *conditioning*, not training data. The JEPA target is the underlying price series. See full details in older CLAUDE.md log.
 
-**2026-06-02 — ECC setup**
+**2026-06-02 -- ECC setup**
 - Gotcha: GateGuard has three distinct triggers per session, each requiring facts before retrying:
-  1. **First Bash** — state the user request and what the command produces
-  2. **First Edit/Write per file** (including new files) — state what imports it, no duplicate exists, data fields, user instruction
-  3. **Destructive Bash** (git rm, reset, etc.) — state files affected, one-line rollback, user instruction
+  1. **First Bash** -- state the user request and what the command produces
+  2. **First Edit/Write per file** (including new files) -- state what imports it, no duplicate exists, data fields, user instruction
+  3. **Destructive Bash** (git rm, reset, etc.) -- state files affected, one-line rollback, user instruction
   All gates pass on the second attempt after facts are presented.
 
-**2026-06-02 — Notebook env (local/VS Code vs Colab)**
-- Gotcha: macOS python.org builds don't trust the system keychain, so `aiohttp` raises `SSL: CERTIFICATE_VERIFY_FAILED` against `api.polygon.io`. Fix is in `PolygonClient`: build `ssl.create_default_context(cafile=certifi.where())` and pass it via `aiohttp.TCPConnector(ssl=ctx)`. Portable — no-op on Colab/Linux. `certifi` is in `requirements.txt`.
-- Colab notebook sync: running the setup cell's `git pull` updates repo code and any Drive copy, but **cannot refresh the notebook tab you're viewing** (a cell can't reload its own document). To get the latest notebook, reopen via File → Open notebook → GitHub tab. The old `shutil.copy2`-to-Drive block was removed because Colab autosave races it and clobbers the synced file.
-- Setup cell guards: `IN_VSCODE = VSCODE_PID/VSCODE_CWD present` forces `IN_COLAB=False` so a local VS Code kernel never triggers the Drive mount / clone. Limitation: a *remote* Colab kernel driven from VS Code won't expose `VSCODE_PID`, so it's still treated as Colab.
-- Local dev: use `.venv` (gitignored) as the VS Code kernel; deps in `requirements.txt`. The notebook's `%pip install` cell is then a fast no-op.
-- Gotcha: Colab's bundled IPython `autoreload` extension does `from imp import reload`, but `imp` was removed in Python 3.12. Fix: shim `sys.modules['imp']` with a minimal `types.ModuleType` that delegates `reload` to `importlib.reload` before calling `%load_ext autoreload`. Both notebooks have this shim in their autoreload cell.
+**2026-06-02 -- Notebook env (local/VS Code vs Colab)**
+- Gotcha: macOS python.org builds don't trust the system keychain, so `aiohttp` raises `SSL: CERTIFICATE_VERIFY_FAILED`. Fix is in `PolygonClient`: build `ssl.create_default_context(cafile=certifi.where())` and pass via `aiohttp.TCPConnector(ssl=ctx)`.
+- Colab notebook sync: running the setup cell's `git pull` updates repo code but **cannot refresh the notebook tab you're viewing**. To get the latest notebook, reopen via File -> Open notebook -> GitHub tab.
+- Gotcha: Colab's bundled IPython `autoreload` extension does `from imp import reload`, but `imp` was removed in Python 3.12. Fix: shim `sys.modules['imp']` with a minimal `types.ModuleType` that delegates `reload` to `importlib.reload` before calling `%load_ext autoreload`. Both notebooks have this shim.
 
-**2026-06-03 — Dev workflow (VS Code → GitHub → Colab)**
-- Canonical loop: **edit `.py` modules in VS Code → `git push` → re-run setup cell in Colab (does `git pull`) → re-run autoreload cell → work cells pick up new code with no kernel restart.**
-- Rule: logic lives in `src/jepa_quant/*.py`. Notebooks are thin drivers (imports + calls). Keeping notebooks thin means you almost never need to reopen from the GitHub tab — only module changes flow through the loop.
-- Rule: **never edit code inside the Colab VM** (`/content/JEPA-quant`). Edits there are lost on VM recycle and will conflict on the next `git pull`. Edit on the Mac, push, pull — one direction only.
-- Rule: **never click "Copy to Drive"** on the Colab banner. Notebooks live on GitHub on purpose; a Drive copy drifts from GitHub silently.
-- Notebooks: open both from **File → Open notebook → GitHub tab**, not from Drive. "Copy to Drive" banner = healthy state, not an error.
-- Outputs (data / checkpoints / plots) write to `MyDrive/Colab Notebooks/JEPA-QUANT/data/...` via the mounted Drive. To get them on the Mac, install Google Drive for Desktop — the folder syncs automatically, no git involved.
-- Notebook edits made in Colab (cell additions etc.): use **File → Save a copy in GitHub** to commit back, then `git pull` locally. Do not use "Save to Drive" for this.
-- Do not use the Colab-in-VS-Code tunnel/extension. It adds a fragile tunnel but does not remove the git push/pull loop — code in VS Code still runs against the VM's git clone, not the local file you're viewing.
+**2026-06-03 -- Dev workflow (VS Code -> GitHub -> Colab)**
+- Canonical loop: **edit `.py` modules in VS Code -> `git push` -> re-run setup cell in Colab (does `git pull`) -> re-run autoreload cell -> work cells pick up new code with no kernel restart.**
+- Rule: logic lives in `src/jepa_quant/*.py`. Notebooks are thin drivers (imports + calls).
+- Rule: **never edit code inside the Colab VM** (`/content/JEPA-quant`). Edits there are lost on VM recycle.
+- Outputs write to `MyDrive/Colab Notebooks/JEPA-QUANT/data/...` via the mounted Drive.
