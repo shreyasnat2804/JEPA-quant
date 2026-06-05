@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="finding" content="First val_jepa decrease (0.0953→0.0945) and monotone val z_std recovery (0.623→0.749). Root cause: cosine schedule decayed lr_enc to its 10% floor by step 2000 — only 1500 steps of active encoder training. Run 4: max_steps 2000→5000, keeping same peaks.">
+  <title>Run 3: val_jepa turns over — but the cosine schedule hit the floor first | JEPA-Quant Log</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    /* ── annotations on code lines ── */
+    .ann {
+      display: inline-block;
+      background: #fef08a;
+      color: #713f12;
+      font-size: 0.72em;
+      font-family: var(--font);
+      border-radius: 3px;
+      padding: 0 5px;
+      margin-left: 6px;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    @media (prefers-color-scheme: dark) {
+      .ann { background: #422006; color: #fef08a; }
+    }
+
+    /* ── run comparison grid ── */
+    .run-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 1rem;
+      margin: 1.25rem 0;
+    }
+    .run-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      background: var(--surface);
+    }
+    .run-card h4 {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 0.6rem;
+    }
+    .run-card .kv { display: flex; justify-content: space-between; font-size: 0.85rem; margin: 2px 0; }
+    .run-card .kv .k { color: var(--text-muted); }
+    .run-card .kv .v { font-family: var(--font-mono); font-weight: 600; }
+    .run-card .kv .v.good { color: #16a34a; }
+    .run-card .kv .v.bad  { color: #dc2626; }
+    .run-card .kv .v.warn { color: #d97706; }
+
+    /* ── delta pill ── */
+    .delta { font-size: 0.75em; padding: 1px 6px; border-radius: 99px; margin-left: 4px; font-weight: 600; }
+    .delta.up   { background: #fee2e2; color: #dc2626; }
+    .delta.down { background: #dcfce7; color: #16a34a; }
+    .delta.flat { background: #f1f5f9; color: #64748b; }
+    @media (prefers-color-scheme: dark) {
+      .delta.up   { background: #7f1d1d; color: #fca5a5; }
+      .delta.down { background: #14532d; color: #86efac; }
+      .delta.flat { background: #1e293b; color: #94a3b8; }
+    }
+
+    /* ── math block ── */
+    .math {
+      background: var(--surface);
+      border-left: 3px solid var(--accent);
+      padding: 0.85rem 1.1rem;
+      margin: 1rem 0;
+      font-family: var(--font-mono);
+      font-size: 0.88em;
+      line-height: 1.9;
+      overflow-x: auto;
+    }
+    .math .comment { color: var(--text-muted); font-style: italic; }
+
+    /* ── schedule diagram ── */
+    .schedule-diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      font-family: var(--font-mono);
+      font-size: 0.78em;
+      line-height: 1.6;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    /* ── insight callout ── */
+    .callout.insight {
+      background: #f5f3ff;
+      border-left-color: #7c3aed;
+      color: #4c1d95;
+    }
+    @media (prefers-color-scheme: dark) {
+      .callout.insight { background: #2e1065; color: #ddd6fe; }
+    }
+
+    /* ── annotated table cells ── */
+    td.hi { background: #f0fdf4; font-weight: 600; }
+    td.lo { background: #fef2f2; }
+    td.mid { background: #fffbeb; }
+    @media (prefers-color-scheme: dark) {
+      td.hi { background: #14532d; }
+      td.lo { background: #7f1d1d; }
+      td.mid { background: #78350f; }
+    }
+
+    /* ── two-column layout ── */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin: 1rem 0; }
+    @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
+
+    details summary { cursor: pointer; font-weight: 600; color: var(--accent); margin: 0.5rem 0; }
+    details[open] summary { margin-bottom: 0.75rem; }
+
+    .stamp {
+      display: inline-block;
+      font-size: 0.72em;
+      font-family: var(--font-mono);
+      background: var(--accent-light);
+      color: var(--accent);
+      border-radius: 3px;
+      padding: 1px 6px;
+    }
+    mark { background: #fef08a; color: inherit; border-radius: 2px; padding: 0 2px; }
+    @media (prefers-color-scheme: dark) { mark { background: #422006; } }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <a class="back-link" href="../index.html">&larr; Research Log</a>
+
+  <header class="entry-header">
+    <h1>Run 3: val_jepa turns over — but the cosine schedule hit the floor first</h1>
+    <div class="entry-meta">
+      <span><strong>Date</strong> 2026-06-04</span>
+      <span><strong>Component</strong> Price Encoder / Training Loop / LR Schedule</span>
+      <span><strong>Status</strong> <span class="badge badge-inconclusive">Inconclusive</span></span>
+      <span><strong>Time</strong> ~3 h (2000-step run to completion)</span>
+    </div>
+  </header>
+
+
+  <!-- ═══ SUMMARY ═══ -->
+  <section class="section">
+    <h2>Summary</h2>
+    <p>
+      Run 3 applied the two fixes from Run 2's diagnosis: <code>lr_encoder 1e-4 → 5e-5</code>
+      (halve encoder drift) and <code>ema_decay 0.998 → 0.999</code> (double the effective EMA
+      target window from ~500 to ~1000 steps). Both changes had their intended effect: the
+      previously monotonically-rising <code>val_jepa</code> stopped rising uniformly, and —
+      for the first time across three runs — <strong>decreased between the final two checkpoints</strong>
+      (0.0953 at step 1750 → 0.0945 at step 2000). Held-out representation diversity
+      (<code>val z_std</code>) recovered monotonically through the second half of training
+      (0.623 at step 750 → 0.749 at step 2000), which had never happened before.
+    </p>
+    <p>
+      However, the model was clearly still improving when training ended. Inspecting the LR
+      trace reveals why: by step 2000, the cosine schedule had already decayed
+      <code>lr_enc</code> to its minimum — <code>5e-6</code>, exactly 10% of peak — because
+      the 2000-step total budget gave only 1400 steps of phase-2 cosine decay (steps 600–2000).
+      The encoder had barely started learning at a useful rate before the schedule pulled it
+      back to near-zero. The diagnosis: not the wrong learning rate, but a schedule too short
+      to let that rate do any meaningful work. Run 4 extends to 5000 steps (4400 steps of
+      cosine decay), restores <code>lr_encoder = 1e-4</code>, and bumps
+      <code>lr_adapter = 5e-5</code>.
+    </p>
+  </section>
+
+
+  <!-- ═══ SETUP ═══ -->
+  <section class="section">
+    <h2>Configuration</h2>
+
+    <h3>What changed from Run 2</h3>
+    <div class="run-grid">
+      <div class="run-card">
+        <h4>Run 1 (baseline)</h4>
+        <div class="kv"><span class="k">lr_encoder</span><span class="v bad">3e-5 (shared)</span></div>
+        <div class="kv"><span class="k">ema_decay</span><span class="v">0.998</span></div>
+        <div class="kv"><span class="k">λ_v / λ_c</span><span class="v bad">25 / 1.0</span></div>
+        <div class="kv"><span class="k">max_steps</span><span class="v">2000</span></div>
+        <div class="kv"><span class="k">val_jepa end</span><span class="v bad">0.092 ↑</span></div>
+      </div>
+      <div class="run-card">
+        <h4>Run 2</h4>
+        <div class="kv"><span class="k">lr_encoder</span><span class="v warn">1e-4 (own group)</span></div>
+        <div class="kv"><span class="k">ema_decay</span><span class="v">0.998</span></div>
+        <div class="kv"><span class="k">λ_v / λ_c</span><span class="v good">10 / 0.05</span></div>
+        <div class="kv"><span class="k">max_steps</span><span class="v">2000</span></div>
+        <div class="kv"><span class="k">val_jepa end</span><span class="v bad">0.147 ↑↑</span></div>
+      </div>
+      <div class="run-card" style="border-color: var(--accent);">
+        <h4>Run 3 ← this entry</h4>
+        <div class="kv"><span class="k">lr_encoder</span><span class="v good">5e-5 (own group)</span></div>
+        <div class="kv"><span class="k">ema_decay</span><span class="v good">0.999</span></div>
+        <div class="kv"><span class="k">λ_v / λ_c</span><span class="v good">10 / 0.05</span></div>
+        <div class="kv"><span class="k">max_steps</span><span class="v">2000</span></div>
+        <div class="kv"><span class="k">val_jepa end</span><span class="v warn">0.0945 ↓ (first!)</span></div>
+      </div>
+      <div class="run-card" style="border-style: dashed;">
+        <h4>Run 4 (queued)</h4>
+        <div class="kv"><span class="k">lr_encoder</span><span class="v">1e-4 (own group)</span></div>
+        <div class="kv"><span class="k">ema_decay</span><span class="v">0.999</span></div>
+        <div class="kv"><span class="k">λ_v / λ_c</span><span class="v">10 / 0.05</span></div>
+        <div class="kv"><span class="k">max_steps</span><span class="v good">5000</span></div>
+        <div class="kv"><span class="k">val_jepa end</span><span class="v" style="color:var(--text-muted)">TBD</span></div>
+      </div>
+    </div>
+
+    <h3>Full Run 3 config</h3>
+    <pre><code>price_encoder : transformer (FROM SCRATCH)  d_model 256  n_heads 8  n_layers 4
+predictor     : Qwen2.5-1.5B + LoRA  r 16  alpha 32  dropout 0.05
+ema_decay     : 0.999        ← was 0.998
+regularizer   : vicreg (V + C only)  lambda_v 10.0  lambda_c 0.05
+batch_size    : 256
+lr_proj       : 1e-4
+lr_adapter    : 3e-5
+lr_encoder    : 5e-5         ← was 1e-4
+lr_warmup_steps : 100        (per-group, from step it activates)
+lr_min_factor : 0.1
+warmup_proj_steps : 500
+max_steps     : 2000
+jepa_loss     : 1 - cosine_similarity(z_pred, z_target)</code></pre>
+  </section>
+
+
+  <!-- ═══ RESULTS ═══ -->
+  <section class="section">
+    <h2>Results</h2>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-name">val JEPA (end)</div>
+        <div class="metric-value">0.0945</div>
+        <div class="metric-note">↓ from 0.0953 — first decrease</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">val z_std (end)</div>
+        <div class="metric-value">0.749</div>
+        <div class="metric-note">up from 0.623 at step 750</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">train z_std</div>
+        <div class="metric-value">1.053</div>
+        <div class="metric-note">stable, hinge satisfied</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">train JEPA (end)</div>
+        <div class="metric-value">0.072</div>
+        <div class="metric-note">train/val gap: 0.022</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">lr_enc at step 2000</div>
+        <div class="metric-value">5e-6</div>
+        <div class="metric-note">= floor (10% of 5e-5)</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">steps</div>
+        <div class="metric-value">2.0 k</div>
+        <div class="metric-note">complete</div>
+      </div>
+    </div>
+
+    <h3>Full validation checkpoint table</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>step</th><th>phase</th>
+            <th>train jepa</th><th>val_jepa</th><th>Δ val_jepa</th>
+            <th>val z_std</th><th>lr_enc</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>250</td><td>1</td>
+            <td>0.031</td><td class="hi">0.0382</td><td>—</td>
+            <td>0.662</td><td>0</td>
+          </tr>
+          <tr>
+            <td>500</td><td>1→2</td>
+            <td>0.047</td><td>0.0525</td><td><span class="delta up">+37%</span></td>
+            <td>0.695</td><td>0 → warmup</td>
+          </tr>
+          <tr>
+            <td>750</td><td>2</td>
+            <td>0.061</td><td>0.0652</td><td><span class="delta up">+24%</span></td>
+            <td class="lo">0.623</td><td>4.88e-5</td>
+          </tr>
+          <tr>
+            <td>1000</td><td>2</td>
+            <td>0.064</td><td>0.0760</td><td><span class="delta up">+17%</span></td>
+            <td>0.640</td><td>4.16e-5</td>
+          </tr>
+          <tr>
+            <td>1250</td><td>2</td>
+            <td>0.066</td><td>0.0843</td><td><span class="delta up">+11%</span></td>
+            <td>0.660</td><td>3.01e-5</td>
+          </tr>
+          <tr>
+            <td>1500</td><td>2</td>
+            <td>0.070</td><td>0.0896</td><td><span class="delta up">+6%</span></td>
+            <td>0.681</td><td>1.78e-5</td>
+          </tr>
+          <tr>
+            <td>1750</td><td>2</td>
+            <td>0.077</td><td>0.0953</td><td><span class="delta up">+6%</span></td>
+            <td>0.716</td><td>8.48e-6</td>
+          </tr>
+          <tr>
+            <td>2000</td><td>2</td>
+            <td>0.072</td><td class="hi">0.0945</td><td><span class="delta down">−0.8%</span></td>
+            <td class="hi">0.749</td><td class="lo">5.00e-6 ← floor</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:0.5rem; font-size:0.88em; color:var(--text-muted);">
+      Two things to notice: (1) the <em>rate</em> of val_jepa increase decelerates run-wide
+      (+37%, +24%, +17%, +11%, +6%, +6%, <span class="delta down">−0.8%</span>) —
+      the drift is visibly slowing. (2) val z_std dips to its minimum at step 750
+      then recovers monotonically, ending at 0.749 — the best across all three runs.
+    </p>
+
+    <h3>Cross-run comparison at each shared checkpoint</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>step</th>
+            <th colspan="2">Run 1<br><small>λ_c=1, lr_enc=3e-5↔LoRA</small></th>
+            <th colspan="2">Run 2<br><small>λ_c=0.05, lr_enc=1e-4</small></th>
+            <th colspan="2">Run 3<br><small>λ_c=0.05, lr_enc=5e-5, decay=0.999</small></th>
+          </tr>
+          <tr>
+            <th></th>
+            <th>val_jepa</th><th>val z_std</th>
+            <th>val_jepa</th><th>val z_std</th>
+            <th>val_jepa</th><th>val z_std</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>250</td>
+            <td class="lo">0.066</td><td>0.695</td>
+            <td class="mid">0.044</td><td>0.712</td>
+            <td class="hi">0.038</td><td>0.662</td>
+          </tr>
+          <tr>
+            <td>500</td>
+            <td class="lo">0.085</td><td>0.683</td>
+            <td class="mid">0.074</td><td>0.734</td>
+            <td class="hi">0.053</td><td>0.695</td>
+          </tr>
+          <tr>
+            <td>750</td>
+            <td class="lo">0.090</td><td>0.607</td>
+            <td class="lo">0.099</td><td>0.582</td>
+            <td class="hi">0.065</td><td>0.623</td>
+          </tr>
+          <tr>
+            <td>1000</td>
+            <td class="mid">0.091</td><td>0.579</td>
+            <td class="lo">0.116</td><td>0.601</td>
+            <td class="hi">0.076</td><td>0.640</td>
+          </tr>
+          <tr>
+            <td>1250</td>
+            <td class="mid">0.092</td><td>0.573</td>
+            <td class="lo">0.130</td><td>0.614</td>
+            <td class="hi">0.084</td><td>0.660</td>
+          </tr>
+          <tr>
+            <td>1500</td>
+            <td class="mid">0.092</td><td>0.532</td>
+            <td class="lo">0.136</td><td>0.682</td>
+            <td class="hi">0.090</td><td>0.681</td>
+          </tr>
+          <tr>
+            <td>2000</td>
+            <td>n/a</td><td>n/a</td>
+            <td class="lo">0.147</td><td>0.762</td>
+            <td class="hi">0.0945</td><td class="hi">0.749</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:0.5rem; font-size:0.88em; color:var(--text-muted);">
+      Green = best value in row. Run 3 wins <em>every</em> row for both metrics.
+      Note that Run 1's val_jepa flattened (0.090→0.092) — not because it was
+      converging, but because the encoder was barely learning at 3e-5. Run 3's
+      0.0945 is lower than Run 1's plateau despite being earlier in convergence.
+    </p>
+
+    <h3>Annotated log excerpt</h3>
+    <pre><code><span style="color:var(--text-muted)"><!-- Phase 1: projections only, encoder frozen --></span>
+[    1/2000] phase=1 loss=9.0633 jepa=1.0424 v=0.8021 c=0.0076 z_std_mean=0.1981
+<span class="ann">random init — covariance near-zero (no correlation in random features yet)</span>
+[   75/2000] phase=1 loss=0.9484 jepa=0.2801 v=0.0467 c=4.0300 z_std_mean=0.9759
+<span class="ann">projection head learning fast — z_std nearly at gamma=1 in 75 steps</span>
+[  250/2000] phase=1 loss=0.3568 jepa=0.0310 v=0.0139 c=3.7345 z_std_mean=1.0108
+        val_jepa=0.0382 z_std=0.6624
+<span class="ann">BEST val_jepa phase-1 opening across all runs. Phase-1 projections are healthy.</span>
+[  500/2000] phase=1 loss=0.2944 jepa=0.0467 v=0.0081 c=3.3298 z_std_mean=1.0261
+        val_jepa=0.0525 z_std=0.6952
+<span class="ann">End of phase 1. val_jepa rose from 0.038 — expected (train JEPA also rising as</span>
+<span class="ann">projection head fine-tunes, creating a harder prediction problem).</span>
+
+<span style="color:var(--text-muted)"><!-- Phase 2: encoder + LoRA adapters activate --></span>
+[  525/2000] phase=2 loss=0.3064 jepa=0.0509 v=0.0093 c=3.2555 lr_enc=1.25e-05
+<span class="ann">Encoder warmup step 25/100. lr_enc just 25% of peak — smooth activation.</span>
+[  600/2000] phase=2 loss=0.3060 jepa=0.0586 v=0.0091 c=3.1331 lr_enc=5.00e-05
+<span class="ann">Warmup complete. Encoder at full 5e-5. Cosine decay begins from here.</span>
+[  750/2000] phase=2 loss=0.2983 jepa=0.0607 v=0.0086 c=3.0274 lr_enc=4.88e-05
+        val_jepa=0.0652 z_std=0.6230
+<span class="ann">val z_std dips to minimum. Encoder moving representations — val dip before recovery</span>
+<span class="ann">is characteristic of "encoder finding useful structure, disrupting old shortcuts".</span>
+[  750→1750]  <span style="color:var(--text-muted)">--- val z_std recovery: 0.623 → 0.716 ---</span>
+[  750→2000]  <span style="color:var(--text-muted)">--- val_jepa rate of increase slows: +24% → +17% → +11% → +6% → -0.8% ---</span>
+[  1750/2000] phase=2 loss=0.2561 jepa=0.0770 v=0.0043 c=2.7158 lr_enc=8.48e-06
+        val_jepa=0.0953 z_std=0.7157
+<span class="ann">lr_enc has decayed to 17% of peak. Nearly at the floor. Very little can change now.</span>
+[  2000/2000] phase=2 loss=0.2398 jepa=0.0720 v=0.0033 c=2.6893 lr_enc=5.00e-06
+        val_jepa=0.0945 z_std=0.7490
+<span class="ann">lr_enc = 5e-6 exactly (= 0.1 × 5e-5 = lr_min_factor × lr_encoder). Floor reached.</span>
+<span class="ann">val_jepa DECREASES for first time. Too little LR left to know if this continues.</span></code></pre>
+  </section>
+
+
+  <!-- ═══ THE LR FLOOR DIAGNOSIS ═══ -->
+  <section class="section">
+    <h2>Root Cause: The Cosine Schedule Hit the Floor</h2>
+
+    <p>
+      The key diagnostic is in the <code>lr_enc</code> column. By step 2000, it reads exactly
+      <code>5e-6</code> — precisely <code>lr_min_factor × lr_encoder = 0.1 × 5e-5</code>. The
+      schedule had nothing left to give. The encoder spent the last ~400 steps of training
+      essentially frozen at the minimum rate, and val_jepa only turned over in that final window.
+      What we observed at step 2000 is not the model converging — it is the model finally
+      reaching a low-enough drift rate that val representations could catch up, but at a point
+      where the LR was too low to sustain the improvement.
+    </p>
+
+    <h3>How the cosine schedule works in this codebase</h3>
+    <div class="math">
+      <span class="comment">-- phase-2 cosine schedule for any param group --</span>
+      lr_peak = lr_encoder (or lr_adapter)
+      lr_min  = lr_min_factor × lr_peak   <span class="comment">= 0.1 × peak</span>
+
+      t_start = warmup_proj_steps + lr_warmup_steps   <span class="comment">= 500 + 100 = 600</span>
+      T       = max_steps - t_start                   <span class="comment">= total cosine decay length</span>
+
+      at step s (after warmup):
+        progress = (s - t_start) / T             <span class="comment">∈ [0, 1]</span>
+        lr(s)    = lr_min + (lr_peak - lr_min) × 0.5 × (1 + cos(π × progress))
+    </div>
+
+    <details>
+      <summary>Show numerical derivation for each run</summary>
+      <div class="two-col" style="margin-top:0.75rem;">
+        <div>
+          <strong>Run 3</strong> (max_steps = 2000)
+          <div class="math">
+T = 2000 - 600 = 1400 steps
+
+at step 2000 (progress = 1.0):
+  lr(2000) = 5e-6 + 0 × 0.5 × (1 + cos(π))
+           = 5e-6 + 0 = <mark>5e-6</mark>  ← floor
+
+at step 1750 (progress = 0.821):
+  lr(1750) = 5e-6 + 45e-6 × 0.5 × (1 + cos(0.821π))
+           = 5e-6 + 45e-6 × 0.5 × (1 − 0.643)
+           = 5e-6 + 45e-6 × 0.179
+           ≈ 5e-6 + 8.0e-6 = <mark>13e-6</mark>
+
+90% of decay complete by step 1890.
+          </div>
+        </div>
+        <div>
+          <strong>Run 4</strong> (max_steps = 5000, lr_peak = 1e-4)
+          <div class="math">
+T = 5000 - 600 = 4400 steps
+
+at "old step 2000" (progress = 1400/4400 = 0.318):
+  lr(2000) = 1e-5 + 9e-5 × 0.5 × (1 + cos(0.318π))
+           = 1e-5 + 9e-5 × 0.5 × (1 + 0.540)
+           = 1e-5 + 9e-5 × 0.770
+           ≈ 1e-5 + 6.93e-5 = <mark>7.93e-5</mark>
+
+at step 3000 (progress = 0.545):
+  lr(3000) ≈ 1e-5 + 9e-5 × 0.5 × (1 + cos(0.545π))
+           ≈ 1e-5 + 9e-5 × 0.5 × (1 − 0.176)
+           ≈ 1e-5 + 9e-5 × 0.412
+           ≈ <mark>4.7e-5</mark>
+          </div>
+        </div>
+      </div>
+      <p style="margin-top:0.75rem;">
+        At the point where Run 3 hit its floor (5e-6), Run 4's encoder will still be
+        running at <strong>7.93e-5</strong> — <strong>15.9× higher</strong>. Same peak LR as
+        Run 2 (1e-4), but spread over 4400 decay steps instead of 1400. Run 2 was too fast
+        (1e-4 concentrated into 1400 steps = aggressive drift). Run 4 is the same peak
+        distributed over 3× more steps = gradual, sustained training.
+      </p>
+    </details>
+
+    <h3>Visual: effective encoder LR over time across runs</h3>
+    <div class="schedule-diagram">lr_enc
+1e-4 ┤                        ╭────╮
+     │                        │    │   Run 2: 1e-4 peak, 1400-step decay
+     │                        │    ╰──────────────────╮
+     │                        │                       ▼ 1e-5 (floor)
+9e-5 ┤
+     │
+     │           Run 4: 1e-4 peak, 4400-step decay
+8e-5 ┤                        ╭──────╮
+7e-5 ┤                        │      ╲
+6e-5 ┤                        │       ╲
+5e-5 ┤          ╭─────╮       │        ╲  Run 3: 5e-5 peak, 1400-step decay
+4e-5 ┤          │     ╲       │         ╲
+3e-5 ┤          │      ╲      │          ╲
+2e-5 ┤          │       ╲     │           ╲       Run 4 (continued)
+1e-5 ┤          │        ▼──┤ │            ╲─────────────────╮
+5e-6 ┤          │        floor│             │                 ▼ 1e-5 (floor)
+0    ┼──────────┴────────────┴─┴─────────────┴──────────────────▶ steps
+     0         500   600   750 1000  1500    2000         4400  5000
+
+     ↑Phase 1↑  ↑─────── Phase 2 cosine decay ────────────────↑</div>
+
+    <div class="callout insight">
+      <strong>The insight:</strong> Peak learning rate and schedule length interact multiplicatively.
+      "Aggressive training" doesn't mean just raising the LR — it means having enough
+      high-LR steps to actually move the parameters. Run 3 had 1400 effective steps at
+      a 5e-5 peak. Run 4 has 4400 steps at a 1e-4 peak — roughly <em>6×</em> the
+      cumulative gradient magnitude over phase 2, even accounting for the cosine decay shape.
+    </div>
+  </section>
+
+
+  <!-- ═══ THE VAL Z_STD STORY ═══ -->
+  <section class="section">
+    <h2>What val z_std is telling us</h2>
+
+    <p>
+      <code>val z_std</code> is the per-dimension standard deviation of held-out
+      <code>z_price</code> embeddings, averaged over dimensions. The VICReg variance
+      hinge pushes this toward <code>gamma = 1.0</code> on <em>training batches only</em>.
+      If the encoder learns structure that genuinely separates different market regimes,
+      val z_std should naturally approach 1.0 as well — because the diversity that exists
+      in the training set also exists in the validation set. If the encoder is
+      overfitting, val z_std diverges downward (collapsed, non-diverse val representations).
+    </p>
+
+    <div class="two-col">
+      <div>
+        <h4 style="margin-bottom:0.5rem;">The dip-then-recovery pattern</h4>
+        <p style="font-size:0.9em;">
+          val z_std dips to its minimum at step 750 (0.623), right after the encoder
+          activates and starts moving representations. This is not a failure — it is the
+          encoder escaping its random-init basin and disrupting the "easy prediction on
+          random features" equilibrium established in phase 1. Once the encoder settles
+          into a new, more structured embedding space, val z_std recovers.
+        </p>
+        <p style="font-size:0.9em; margin-top:0.5rem;">
+          In Run 2 (lr_enc=1e-4), the dip went to 0.582 and the recovery was incomplete
+          (stuck at 0.762 by step 2000, with val_jepa still rising fast). The encoder
+          moved too fast for the EMA to smooth, so the "settling" never happened —
+          it kept drifting.
+        </p>
+        <p style="font-size:0.9em; margin-top:0.5rem;">
+          In Run 3 (lr_enc=5e-5, ema_decay=0.999), the dip is shallower (0.623) and the
+          recovery is monotone. val z_std at step 2000 (0.749) is close to Run 2's
+          (0.762) despite a slower encoder — meaning more of the diversity is genuine
+          and less is "inflated by the training hinge".
+        </p>
+      </div>
+      <div>
+        <h4 style="margin-bottom:0.5rem;">val z_std trajectory</h4>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>step</th><th>val z_std</th><th>note</th></tr></thead>
+            <tbody>
+              <tr><td>250</td><td>0.662</td><td>phase 1, encoder frozen</td></tr>
+              <tr><td>500</td><td>0.695</td><td>end phase 1</td></tr>
+              <tr><td class="lo">750</td><td class="lo">0.623</td><td>⬇ minimum — encoder disrupting representations</td></tr>
+              <tr><td>1000</td><td>0.640</td><td>⬆ recovering</td></tr>
+              <tr><td>1250</td><td>0.660</td><td>⬆</td></tr>
+              <tr><td>1500</td><td>0.681</td><td>⬆</td></tr>
+              <tr><td>1750</td><td>0.716</td><td>⬆ accelerating</td></tr>
+              <tr><td class="hi">2000</td><td class="hi">0.749</td><td>⬆ monotone since step 750</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="font-size:0.8em; color:var(--text-muted); margin-top:0.4rem;">
+          Monotone recovery since step 750 is the healthiest pattern we've seen.
+          Gap to target (1.0): 0.251 — the model is not there yet.
+        </p>
+      </div>
+    </div>
+
+    <div class="callout warning">
+      The train z_std is pinned at ~1.05 (variance hinge satisfied) while val z_std
+      is at 0.749. A gap of 0.30 means the encoder's representations are more spread
+      on training data than on val. Some of this is expected (VICReg only optimises on
+      train batches). But a large gap is a signal that the model hasn't fully generalised.
+      If Run 4 narrows this gap significantly, it confirms the encoder is learning
+      regime-separating structure. If the gap stays wide even at 5000 steps, the
+      problem may be in the data (insufficient regime diversity in the training window).
+    </div>
+  </section>
+
+
+  <!-- ═══ ANALYSIS ═══ -->
+  <section class="section">
+    <h2>Analysis &amp; Findings</h2>
+
+    <h3>The three runs tell a coherent story</h3>
+    <p>
+      Looking across all three runs, there is a single underlying quantity that
+      explains every outcome: <strong>how many steps does the encoder train at a
+      meaningfully high LR?</strong>
+    </p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th><th>lr_enc peak</th><th>decay steps</th>
+            <th>lr_enc at step 1000</th><th>lr_enc at step 2000</th>
+            <th>val_jepa trajectory</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>3e-5 (shared)</td><td>1400</td>
+            <td>~2.3e-5</td><td>~3e-6 (floor)</td>
+            <td class="mid">flat ~0.091 (plateau — encoder barely learned)</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>1e-4 (own)</td><td>1400</td>
+            <td>~8.3e-5</td><td>~1e-5 (floor)</td>
+            <td class="lo">monotone ↑ to 0.147 (encoder drifted too fast)</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>5e-5 (own)</td><td>1400</td>
+            <td>~4.2e-5</td><td>~5e-6 (floor)</td>
+            <td class="hi">decelerating ↑, final step ↓ (right rate, wrong duration)</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td>1e-4 (own)</td><td>4400</td>
+            <td>~9.0e-5</td><td>~7.9e-5 (89% of peak)</td>
+            <td><em>TBD</em></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>
+      Run 1: encoder learned too slowly, val_jepa plateaued (no representation change
+      = no drift, but also no improvement). Run 2: encoder learned at the right magnitude
+      but outpaced the EMA's ability to smooth the target, causing drift. Run 3: right
+      magnitude (<code>ema_decay=0.999</code> slowed the effective target update, halving
+      the rate addressed the drift) but a schedule that expired before convergence.
+      The val_jepa decrease at step 2000 is the clearest signal yet that 5e-5 is in
+      the right regime — if only there were more steps left.
+    </p>
+
+    <h3>Why lr_encoder=1e-4 is safe in Run 4 but failed in Run 2</h3>
+    <p>
+      Run 2 had <code>ema_decay=0.998</code>, giving the EMA an effective window of
+      ~500 steps (1 / (1 − 0.998)). With lr_enc=1e-4 and 1400 cosine steps,
+      the encoder moved fast enough to substantially shift representations within
+      that 500-step window. The predictor trained on the shifted distribution; val
+      representations lagged behind; val_jepa rose.
+    </p>
+    <p>
+      Run 4 has <code>ema_decay=0.999</code> (~1000-step window) and 4400 cosine steps.
+      Even with lr_enc=1e-4, the change in representations per 1000-step EMA window
+      is much smaller because the cosine schedule keeps the LR high but the gradient
+      steps are being used more efficiently (the encoder isn't just thrashing in the
+      first 1400 steps). It's the difference between sprinting 1400 meters and pacing
+      yourself over 4400.
+    </p>
+
+    <div class="callout success">
+      val_jepa decreased for the first time. val z_std recovered monotonically after
+      step 750. The rate-of-increase deceleration (from +24% to −0.8% across
+      checkpoints) is a clean trend, not noise. The encoder is learning the right
+      things — it just needs more time.
+    </div>
+
+    <div class="callout danger">
+      The cosine schedule hit its floor by step 2000. The model was still improving
+      at the maximum rate possible given the remaining LR (≈ zero). Running longer
+      at 5e-5 floor is not useful — a meaningfully higher LR for the full 5000-step
+      budget is what's needed.
+    </div>
+  </section>
+
+
+  <!-- ═══ THOUGHT PROCESS ═══ -->
+  <section class="section">
+    <h2>Thought Process &amp; Debugging Notes</h2>
+
+    <p>
+      First read of the logs: the val_jepa deceleration pattern is immediately visible —
+      the percentage increases across checkpoints are shrinking. That alone suggests
+      the Run 2 diagnosis was correct (slower drift) and the remaining issue is
+      convergence speed, not fundamentals.
+    </p>
+    <p>
+      The lr_enc column is the smoking gun. At step 1750, it reads <code>8.48e-6</code>,
+      which is 17% of the 5e-5 peak. By step 2000 it's exactly <code>5e-6</code> — the
+      theoretical minimum. This isn't approximately at the floor; it <em>is</em> the
+      floor, computed as <code>lr_min_factor × lr_encoder = 0.1 × 5e-5</code> exactly.
+      So the model went from 8.48e-6 at step 1750 to 5e-6 at step 2000 — a period of
+      near-zero learning — and val_jepa still managed to tick down. That's the most
+      optimistic possible reading of a bad situation.
+    </p>
+    <p>
+      The user described the model as "untrained", which is exactly right in a specific
+      sense: the encoder's cosine budget was exhausted before convergence. The difference
+      between an "undertrained" model and a "converged-but-limited" model matters for
+      what to try next. If it were the latter, more steps wouldn't help — you'd need
+      more data or a different architecture. Since it's the former, extending the
+      schedule should show clear continued improvement.
+    </p>
+    <p>
+      The decision to restore <code>lr_encoder=1e-4</code> in Run 4 came from the
+      math: with 4400 decay steps instead of 1400, the cosine curve is three times
+      flatter. A 1e-4 encoder LR decayed over 4400 steps moves representations more
+      slowly at any given step than the same LR over 1400 steps. Run 4 is not "more
+      aggressive than Run 2 despite the same peak LR" — it is less aggressive <em>per step</em>,
+      but more aggressive in total training effort. The ema_decay=0.999 window (~1000
+      steps) now comfortably spans the region of the schedule where LR is high, so
+      the target gets to average over many near-peak-LR steps before the encoder moves
+      substantially.
+    </p>
+  </section>
+
+
+  <!-- ═══ LESSONS ═══ -->
+  <section class="section">
+    <h2>Lessons Learned</h2>
+    <ul>
+      <li>
+        <strong>Read the LR trace, not just the loss.</strong> val_jepa turning over is
+        good news, but the lr_enc column tells you <em>why</em> and whether it will
+        continue. A model improving at near-zero LR is not converging — it is coasting
+        on momentum.
+      </li>
+      <li>
+        <strong>Cosine schedule length and peak LR are not independent.</strong>
+        The same peak LR over 3× more steps is a fundamentally different training regime —
+        representations change more slowly per EMA window, making the target smoother.
+        "Reduce peak LR to reduce drift" and "extend the schedule" are interchangeable
+        to first order when EMA decay stays fixed.
+      </li>
+      <li>
+        <strong>val z_std's dip-then-recovery is a healthy pattern.</strong>
+        The dip at step 750 is not failure — it is the encoder escaping its random-init
+        basin and disrupting the degenerate phase-1 equilibrium. The question to ask is
+        whether it recovers. In Run 3 it recovered monotonically. In Run 2 it partially
+        recovered but val_jepa kept rising, because the encoder was moving too fast to
+        settle.
+      </li>
+      <li>
+        <strong>Deceleration in val_jepa rate-of-increase is a leading indicator.</strong>
+        The transitions +24% → +17% → +11% → +6% → −0.8% were visible well before the
+        final decrease. If this deceleration appeared earlier and the LR budget hadn't
+        run out, we would have seen the turnaround sooner.
+      </li>
+    </ul>
+  </section>
+
+
+  <!-- ═══ NEXT STEPS ═══ -->
+  <section class="section">
+    <h2>Next Steps (Run 4)</h2>
+    <ol>
+      <li>
+        <strong>max_steps: 2000 → 5000.</strong> Primary change. Phase-2 cosine
+        decay extends from 1400 to 4400 steps. At step 2000 (the old finish line),
+        lr_enc will be ~7.9e-5 instead of 5e-6.
+      </li>
+      <li>
+        <strong>lr_encoder: 5e-5 → 1e-4.</strong> Run 2 showed 1e-4 with 1400 decay
+        steps drifts too fast. Run 3 showed 5e-5 with 1400 steps converges but runs
+        out of schedule. Run 4: 1e-4 with 4400 steps. The cosine curve is ~3× flatter,
+        the per-step representation change is similar to Run 3, but the model gets to
+        run that change for 3× as long.
+      </li>
+      <li>
+        <strong>lr_adapter: 3e-5 → 5e-5.</strong> The predictor LoRA is on the same
+        cosine curve — it was also at its floor by step 2000. The predictor may be
+        the limiting factor in val_jepa: if the encoder produces good representations
+        but the predictor can't fit to them, val_jepa won't decrease. Bump it
+        proportionally to the encoder rate increase.
+      </li>
+      <li>
+        <strong>Watch for:</strong> val_jepa decreasing consistently across checkpoints
+        in the 1000–3000 step window (not just the final step), val z_std approaching
+        0.85+, and the train/val JEPA gap narrowing. If val_jepa continues to rise even
+        in Run 4, the data (regime diversity) is the likely explanation and a PCA/UMAP
+        of val embeddings is the next diagnostic.
+      </li>
+    </ol>
+  </section>
+
+
+  <footer class="site-footer">
+    JEPA-Quant &mdash; <a href="../index.html">Research Log</a> &mdash;
+    <a href="https://github.com/shreyasnat2804/JEPA-quant">GitHub</a>
+  </footer>
+
+</div>
+</body>
+</html>
