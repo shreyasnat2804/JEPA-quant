@@ -98,6 +98,33 @@ def _infinite(loader: Iterable) -> Iterator:
         yield from loader
 
 
+def _apply_phase2_scaled_init(price_encoder: nn.Module) -> None:
+    """GPT-2 scaled init applied at the Phase 1→2 boundary, not at construction.
+
+    Scaling at construction poisons Phase 1: the frozen backbone acts near-identity,
+    the projection head solves an artificially easy problem, then Phase 2 unfreeze
+    causes the backbone to 'grow' its residuals and drift representations out from
+    under the predictor. Applying the scaling here instead means Phase 1 trains on
+    realistic representations; at transition the backbone residual projections are
+    scaled down so the initial Phase 2 updates are small, giving the predictor time
+    to re-adapt during the LR warmup.
+
+    Only touches TransformerPriceEncoder (detected via ``backbone.layers``);
+    MoiraiPriceEncoder has no such attribute and is silently skipped.
+    """
+    backbone = getattr(price_encoder, "backbone", None)
+    if backbone is None or not hasattr(backbone, "layers"):
+        return
+    n_layers = len(backbone.layers)
+    scale = 1.0 / math.sqrt(2 * n_layers)
+    with torch.no_grad():
+        for enc_layer in backbone.layers:
+            if hasattr(enc_layer, "self_attn") and hasattr(enc_layer.self_attn, "out_proj"):
+                enc_layer.self_attn.out_proj.weight.mul_(scale)
+            if hasattr(enc_layer, "linear2"):
+                enc_layer.linear2.weight.mul_(scale)
+
+
 class JEPATrainer:
     def __init__(
         self,
@@ -218,6 +245,7 @@ class JEPATrainer:
         return fn
 
     def _enter_phase_2(self) -> None:
+        _apply_phase2_scaled_init(self.c.price_encoder)
         for p in self.phase2_params:
             p.requires_grad_(True)
         self.phase = 2

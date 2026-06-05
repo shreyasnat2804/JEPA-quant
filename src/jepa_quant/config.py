@@ -183,16 +183,19 @@ class TrainConfig:
     # Price-encoder backbone lr in Phase 2. Kept SEPARATE from lr_adapter.
     # Run 1: 3e-5 shared with LoRA → encoder barely moved. Run 2: 1e-4 → drifted
     # too fast for 1500-step cosine schedule. Run 3: 5e-5 → val_jepa turned over
-    # at step 2000 but LR was already at floor. Run 4: back to 1e-4 with 4500-step
-    # cosine decay — peak LR sustained long enough to actually train the encoder.
+    # at step 2000 but LR was already at floor. Run 4: 1e-4 with 4500-step cosine
+    # → still drifted (jepa rose monotonically to 0.15 by step 1800; root cause:
+    # lr_encoder too high regardless of schedule length). Run 5: 2e-5 + Phase-2
+    # scaled init (applied at transition, not construction) + 200-step warmup.
     # For frozen pretrained Moirai backbone this group is empty and unused.
-    lr_encoder: float = 1e-4
+    lr_encoder: float = 2e-5
     # LR schedule (warmup -> cosine) applied per param group for stability when a
     # from-scratch backbone switches on. Each group ramps linearly from 0 over
     # ``lr_warmup_steps`` starting at the step it becomes active (Phase 2 for the
     # encoder/adapters), then cosine-decays to ``lr_min_factor`` x base by
-    # ``max_steps``.
-    lr_warmup_steps: int = 100
+    # ``max_steps``. Extended to 200 (was 100) to give the predictor time to
+    # re-adapt after the Phase-2 scaled-init representation jump.
+    lr_warmup_steps: int = 200
     lr_min_factor: float = 0.1
     weight_decay: float = 1e-2
     grad_clip: float = 1.0
