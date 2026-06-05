@@ -397,6 +397,199 @@ jepa_loss     : 1 - cosine_similarity(z_pred, z_target)</code></pre>
       0.0945 is lower than Run 1's plateau despite being earlier in convergence.
     </p>
 
+    <h3>val_jepa over training steps — all three runs</h3>
+    <figure style="margin: 1rem 0;">
+      <!--
+        SVG chart — inline, no image files.
+        Plot area: x∈[60,680], y∈[20,320]  (width=620, height=300)
+        X: x(step) = 60 + step × 0.31
+        Y: y(v)    = 320 − v × 1875   (inverted: high val_jepa → low y → high on screen)
+
+        Run 1 checkpoints: 250,500,750,1000,1250,1500
+        Run 2 checkpoints: 250,500,750,1000,1250,1500,1750,2000
+        Run 3 checkpoints: 250,500,750,1000,1250,1500,1750,2000
+      -->
+      <div style="background:#fff; border:1px solid #e2e8f0; border-radius:6px; padding:0.5rem; overflow-x:auto;">
+        <svg viewBox="0 0 720 370" xmlns="http://www.w3.org/2000/svg"
+             style="width:100%; max-width:720px; display:block; font-family:system-ui,sans-serif;">
+
+          <!-- ── chart background ── -->
+          <rect x="60" y="20" width="620" height="300" fill="#f8fafc" rx="3"/>
+
+          <!-- ── phase 2 shaded region (step 500 → 2000, x=215→680) ── -->
+          <rect x="215" y="20" width="465" height="300" fill="#eff6ff" opacity="0.55"/>
+          <text x="220" y="34" font-size="9.5" fill="#93c5fd">Phase 2 (encoder active) →</text>
+
+          <!-- ── Y grid lines ── -->
+          <!-- y=0.04 → y_px=245 -->
+          <line x1="60" y1="245" x2="680" y2="245" stroke="#e2e8f0" stroke-width="1"/>
+          <!-- y=0.08 → y_px=170 -->
+          <line x1="60" y1="170" x2="680" y2="170" stroke="#e2e8f0" stroke-width="1"/>
+          <!-- y=0.12 → y_px=95 -->
+          <line x1="60" y1="95"  x2="680" y2="95"  stroke="#e2e8f0" stroke-width="1"/>
+
+          <!-- ── X grid lines (dashed) ── -->
+          <line x1="215" y1="20" x2="215" y2="320" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,3"/>
+          <line x1="370" y1="20" x2="370" y2="320" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4,3"/>
+          <line x1="525" y1="20" x2="525" y2="320" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4,3"/>
+          <line x1="680" y1="20" x2="680" y2="320" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4,3"/>
+
+          <!-- ── axes ── -->
+          <line x1="60" y1="320" x2="680" y2="320" stroke="#94a3b8" stroke-width="1.5"/>
+          <line x1="60" y1="20"  x2="60"  y2="320" stroke="#94a3b8" stroke-width="1.5"/>
+
+          <!-- ── Y axis labels ── -->
+          <text x="54" y="249" font-size="10" fill="#64748b" text-anchor="end">0.04</text>
+          <text x="54" y="174" font-size="10" fill="#64748b" text-anchor="end">0.08</text>
+          <text x="54" y="99"  font-size="10" fill="#64748b" text-anchor="end">0.12</text>
+          <text x="54" y="24"  font-size="10" fill="#64748b" text-anchor="end">0.16</text>
+          <text x="54" y="324" font-size="10" fill="#64748b" text-anchor="end">0</text>
+
+          <!-- ── X axis labels ── -->
+          <text x="60"  y="337" font-size="10" fill="#64748b" text-anchor="middle">0</text>
+          <text x="215" y="337" font-size="10" fill="#64748b" text-anchor="middle">500</text>
+          <text x="370" y="337" font-size="10" fill="#64748b" text-anchor="middle">1000</text>
+          <text x="525" y="337" font-size="10" fill="#64748b" text-anchor="middle">1500</text>
+          <text x="680" y="337" font-size="10" fill="#64748b" text-anchor="middle">2000</text>
+
+          <!-- ── axis titles ── -->
+          <text x="370" y="355" font-size="11" fill="#475569" text-anchor="middle">step</text>
+          <text x="14" y="170" font-size="11" fill="#475569" text-anchor="middle"
+                transform="rotate(-90 14 170)">val_jepa</text>
+
+          <!--
+            ══════════════════════════════════════════════════
+            RUN 1  —  red, dashed (ended at step 1500)
+            lr_enc = 3e-5 shared, λ_c=1.0
+            Points: (250,0.066)(500,0.085)(750,0.090)(1000,0.091)(1250,0.092)(1500,0.092)
+            x: 137.5 215 292.5 370 447.5 525
+            y: 196.3 160.6 151.3 149.4 147.5 147.5
+            ══════════════════════════════════════════════════
+          -->
+          <polyline
+            points="137.5,196.3 215,160.6 292.5,151.3 370,149.4 447.5,147.5 525,147.5"
+            fill="none" stroke="#ef4444" stroke-width="1.8" stroke-dasharray="7,4" opacity="0.75"/>
+          <circle cx="137.5" cy="196.3" r="3.5" fill="#ef4444" opacity="0.75"/>
+          <circle cx="215"   cy="160.6" r="3.5" fill="#ef4444" opacity="0.75"/>
+          <circle cx="292.5" cy="151.3" r="3.5" fill="#ef4444" opacity="0.75"/>
+          <circle cx="370"   cy="149.4" r="3.5" fill="#ef4444" opacity="0.75"/>
+          <circle cx="447.5" cy="147.5" r="3.5" fill="#ef4444" opacity="0.75"/>
+          <circle cx="525"   cy="147.5" r="3.5" fill="#ef4444" opacity="0.75"/>
+          <!-- plateau annotation -->
+          <line x1="510" y1="133" x2="480" y2="145" stroke="#ef4444" stroke-width="1"
+                stroke-dasharray="3,2" opacity="0.75"/>
+          <text x="513" y="131" font-size="9" fill="#ef4444" opacity="0.9">plateau — encoder not learning</text>
+
+          <!--
+            ══════════════════════════════════════════════════
+            RUN 2  —  orange (monotone rise, 2000 steps)
+            lr_enc = 1e-4, λ_c=0.05, ema_decay=0.998
+            Points: (250,0.044)(500,0.074)(750,0.099)(1000,0.116)
+                    (1250,0.130)(1500,0.136)(1750,0.143)(2000,0.147)
+            x: 137.5 215 292.5 370 447.5 525 602.5 680
+            y: 237.5 181.3 134.4 102.5 76.3 65.0 51.9 44.4
+            ══════════════════════════════════════════════════
+          -->
+          <polyline
+            points="137.5,237.5 215,181.3 292.5,134.4 370,102.5 447.5,76.3 525,65.0 602.5,51.9 680,44.4"
+            fill="none" stroke="#f97316" stroke-width="1.8" opacity="0.85"/>
+          <circle cx="137.5" cy="237.5" r="3.5" fill="#f97316"/>
+          <circle cx="215"   cy="181.3" r="3.5" fill="#f97316"/>
+          <circle cx="292.5" cy="134.4" r="3.5" fill="#f97316"/>
+          <circle cx="370"   cy="102.5" r="3.5" fill="#f97316"/>
+          <circle cx="447.5" cy="76.3"  r="3.5" fill="#f97316"/>
+          <circle cx="525"   cy="65.0"  r="3.5" fill="#f97316"/>
+          <circle cx="602.5" cy="51.9"  r="3.5" fill="#f97316"/>
+          <circle cx="680"   cy="44.4"  r="3.5" fill="#f97316"/>
+          <!-- terminal label -->
+          <text x="684" y="47" font-size="9.5" fill="#f97316" font-weight="600">0.147</text>
+
+          <!--
+            ══════════════════════════════════════════════════
+            RUN 3  —  blue, bold (first val_jepa dip at step 2000)
+            lr_enc = 5e-5, ema_decay=0.999
+            Points: (250,0.0382)(500,0.0525)(750,0.0652)(1000,0.0760)
+                    (1250,0.0843)(1500,0.0896)(1750,0.0953)(2000,0.0945)
+            x: 137.5 215 292.5 370 447.5 525 602.5 680
+            y: 248.4 221.6 197.8 177.5 161.9 152.0 141.3 142.8
+            NOTE: y increases 141.3→142.8 at step 2000 = val_jepa DECREASES
+            ══════════════════════════════════════════════════
+          -->
+          <!-- subtle area fill under run 3 line to make it pop -->
+          <polygon
+            points="137.5,248.4 215,221.6 292.5,197.8 370,177.5 447.5,161.9 525,152.0 602.5,141.3 680,142.8 680,320 137.5,320"
+            fill="#2563eb" opacity="0.06"/>
+          <polyline
+            points="137.5,248.4 215,221.6 292.5,197.8 370,177.5 447.5,161.9 525,152.0 602.5,141.3 680,142.8"
+            fill="none" stroke="#2563eb" stroke-width="2.5"/>
+          <circle cx="137.5" cy="248.4" r="4"   fill="#2563eb"/>
+          <circle cx="215"   cy="221.6" r="4"   fill="#2563eb"/>
+          <circle cx="292.5" cy="197.8" r="4"   fill="#2563eb"/>
+          <circle cx="370"   cy="177.5" r="4"   fill="#2563eb"/>
+          <circle cx="447.5" cy="161.9" r="4"   fill="#2563eb"/>
+          <circle cx="525"   cy="152.0" r="4"   fill="#2563eb"/>
+          <circle cx="602.5" cy="141.3" r="4"   fill="#2563eb"/>
+          <!-- final point: ring highlight for the decrease -->
+          <circle cx="680"   cy="142.8" r="6.5" fill="none" stroke="#2563eb" stroke-width="2"/>
+          <circle cx="680"   cy="142.8" r="3.5" fill="#2563eb"/>
+          <!-- leader line + annotation for the dip -->
+          <line x1="668" y1="127" x2="680" y2="140" stroke="#2563eb" stroke-width="1.2"
+                stroke-dasharray="3,2"/>
+          <rect x="590" y="113" width="75" height="16" rx="3" fill="#eff6ff"/>
+          <text x="627" y="125" font-size="9" fill="#1d4ed8" text-anchor="middle"
+                font-weight="700">↓ first decrease</text>
+          <!-- step 1750 annotation: peak before dip -->
+          <line x1="590" y1="135" x2="604" y2="141" stroke="#2563eb" stroke-width="1"
+                stroke-dasharray="3,2" opacity="0.6"/>
+          <text x="588" y="133" font-size="8.5" fill="#2563eb" text-anchor="end"
+                opacity="0.8">1750: 0.0953</text>
+          <!-- terminal label -->
+          <text x="684" y="146" font-size="9.5" fill="#2563eb" font-weight="600">0.0945</text>
+
+          <!-- val z_std dip marker on Run 3 at step 750 (z_std = 0.623, lowest) -->
+          <line x1="292.5" y1="207" x2="292.5" y2="310" stroke="#2563eb" stroke-width="1"
+                stroke-dasharray="2,3" opacity="0.4"/>
+          <text x="296" y="314" font-size="8" fill="#2563eb" opacity="0.7">z_std min (0.623)</text>
+
+          <!--
+            ── Legend ──
+          -->
+          <rect x="67" y="42" width="192" height="62" rx="4"
+                fill="white" fill-opacity="0.92" stroke="#e2e8f0"/>
+          <!-- Run 1 -->
+          <line x1="76" y1="57" x2="98" y2="57" stroke="#ef4444" stroke-width="2"
+                stroke-dasharray="6,3" opacity="0.75"/>
+          <text x="103" y="61" font-size="10" fill="#475569">
+            Run 1 — lr_enc 3e-5, λ_c=1.0
+          </text>
+          <!-- Run 2 -->
+          <line x1="76" y1="72" x2="98" y2="72" stroke="#f97316" stroke-width="2"/>
+          <text x="103" y="76" font-size="10" fill="#475569">
+            Run 2 — lr_enc 1e-4, decay 0.998
+          </text>
+          <!-- Run 3 -->
+          <line x1="76" y1="87" x2="98" y2="87" stroke="#2563eb" stroke-width="2.5"/>
+          <text x="103" y="91" font-size="10" fill="#475569">
+            Run 3 — lr_enc 5e-5, decay 0.999
+          </text>
+
+          <!-- Phase 2 boundary vertical label -->
+          <text x="219" y="318" font-size="8.5" fill="#94a3b8">↑ step 500</text>
+
+        </svg>
+      </div>
+      <figcaption style="font-size:0.82em; color:#64748b; margin-top:0.5rem; line-height:1.5;">
+        <strong>val_jepa at each validation checkpoint across all three runs.</strong>
+        Blue shaded region = Phase 2 (encoder active). Run 3 (blue) is the only run where
+        val_jepa decreases between the final two checkpoints (step 1750 → 2000, ringed point).
+        The subtle area fill under Run 3 emphasises that it stays below both prior runs at
+        every checkpoint despite covering the full 2000 steps. The vertical dashed marker at
+        step 750 notes where <code>val z_std</code> hit its minimum (0.623) — the start of
+        the recovery trend.
+        Run 1 (red, dashed) is shown only through step 1500 where training was halted.
+      </figcaption>
+    </figure>
+
     <h3>Annotated log excerpt</h3>
     <pre><code><span style="color:var(--text-muted)"><!-- Phase 1: projections only, encoder frozen --></span>
 [    1/2000] phase=1 loss=9.0633 jepa=1.0424 v=0.8021 c=0.0076 z_std_mean=0.1981
