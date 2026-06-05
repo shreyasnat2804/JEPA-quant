@@ -201,6 +201,11 @@ class TrainConfig:
     grad_clip: float = 1.0
     log_every: int = 25
     val_every: int = 250
+    # Early stopping: halt if val_jepa does not improve by more than
+    # ``es_min_delta`` for ``es_patience`` consecutive val checkpoints.
+    # Set ``es_patience=0`` to disable.
+    es_patience: int = 6
+    es_min_delta: float = 0.002
     seed: int = 42
     device: str = "cuda"  # notebook resolves to cpu if unavailable
     num_workers: int = 2

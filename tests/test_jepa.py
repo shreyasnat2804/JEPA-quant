@@ -531,6 +531,40 @@ def test_trainer_codebook_kmeans_init_path(cfg):
     assert comp.regularizer._initialised is True
 
 
+def test_trainer_early_stopping_halts_training(cfg):
+    # Set es_patience=1 and val_every=3 so the second val check triggers early stop.
+    es_cfg = dc.replace(
+        cfg,
+        train=dc.replace(cfg.train, max_steps=30, val_every=3, es_patience=1, es_min_delta=0.0),
+    )
+    comp = build_components(es_cfg)
+    train_loader, val_loader = build_dataloaders(es_cfg)
+    trainer = JEPATrainer(es_cfg, comp, train_loader, val_loader)
+    history = trainer.train()
+    # With patience=1 the loop must stop before exhausting all 30 steps.
+    last_step = history[-1]["step"] if history else 0
+    assert last_step < 30, f"Expected early stop before step 30, got {last_step}"
+
+
+def test_trainer_on_new_best_callback_fires(cfg):
+    saved: list[dict] = []
+    # val_every=3, max_steps=6 → two val checks; es_patience=10 (won't trigger).
+    cb_cfg = dc.replace(
+        cfg,
+        train=dc.replace(cfg.train, max_steps=6, val_every=3, es_patience=10),
+    )
+    comp = build_components(cb_cfg)
+    train_loader, val_loader = build_dataloaders(cb_cfg)
+    trainer = JEPATrainer(cb_cfg, comp, train_loader, val_loader, on_new_best=saved.append)
+    trainer.train()
+    # At least the very first val check should produce a new best.
+    assert len(saved) >= 1
+    ck = saved[0]
+    assert {"step", "val_jepa", "price_encoder", "predictor", "opt"} == set(ck)
+    assert isinstance(ck["step"], int)
+    assert np.isfinite(ck["val_jepa"])
+
+
 # ---------------------------------------------------------------------------
 # config.py — JEPAConfig consistency validation
 # ---------------------------------------------------------------------------

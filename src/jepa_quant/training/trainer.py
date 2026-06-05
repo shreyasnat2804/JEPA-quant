@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 import numpy as np
 import torch
@@ -133,6 +133,7 @@ class JEPATrainer:
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
         jepa_kind: JepaKind = "cosine",
+        on_new_best: Optional[Callable[[dict], None]] = None,
     ) -> None:
         # An empty train loader would make ``_infinite`` spin forever yielding
         # nothing (``next`` never returns) — fail loudly instead of hanging.
@@ -150,6 +151,7 @@ class JEPATrainer:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.jepa_kind = jepa_kind
+        self.on_new_best = on_new_best
         self.device = resolve_device(cfg.train.device)
 
         set_seed(cfg.train.seed)
@@ -157,6 +159,8 @@ class JEPATrainer:
         self._build_optimizer()
         self.phase = 1
         self.history: list[dict] = []
+        self._best_val_jepa: float = float("inf")
+        self._es_counter: int = 0
 
     # ---- setup -----------------------------------------------------------
 
@@ -336,6 +340,24 @@ class JEPATrainer:
                 if self.history:
                     self.history[-1]["val_jepa"] = val["val_jepa"]
                 print(f"        val_jepa={val['val_jepa']:.4f} z_std={val['val_z_std']:.4f}")
+                val_jepa = val["val_jepa"]
+                if val_jepa < self._best_val_jepa - cfg.es_min_delta:
+                    self._best_val_jepa = val_jepa
+                    self._es_counter = 0
+                    if self.on_new_best is not None:
+                        ckpt = {
+                            "step": step,
+                            "val_jepa": val_jepa,
+                            "price_encoder": self.c.price_encoder.state_dict(),
+                            "predictor": self.c.predictor.state_dict(),
+                            "opt": self.opt.state_dict(),
+                        }
+                        self.on_new_best(ckpt)
+                else:
+                    self._es_counter += 1
+                    if cfg.es_patience > 0 and self._es_counter >= cfg.es_patience:
+                        print(f"Early stop at step {step}")
+                        break
 
             # Advance the lr schedule last, so the lr logged above is the one
             # actually used for this step (LambdaLR set step-1's value on entry).
