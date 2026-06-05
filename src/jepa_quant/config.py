@@ -166,20 +166,25 @@ class TrainConfig:
     # if GPU memory forces a smaller micro-batch.
     batch_size: int = 256
     grad_accum_steps: int = 1
-    max_steps: int = 2000
+    # Run 3 (5e-5, 2000 steps) showed val_jepa turning over at the very end
+    # (0.0953→0.0945) but the cosine schedule had already decayed lr_enc to its
+    # floor (5e-6) by step 2000 — only 1500 effective steps of encoder training.
+    # Root cause of "untrained" look: too short a schedule, not too low a peak LR.
+    # Fix: 5000 steps gives 4500 steps of phase-2 decay; at the old step-2000
+    # point lr_enc is still ~7.9e-5 (89% of peak) instead of 5e-6 (10%).
+    # lr_encoder returns to 1e-4 — safe now because the longer cosine decay
+    # spreads the same total gradient work over 3x more steps.
+    max_steps: int = 5000
     warmup_proj_steps: int = 500  # Phase 1: projections only, predictor adapters frozen
     lr_proj: float = 1e-4
-    lr_adapter: float = 3e-5  # predictor adapters (LoRA) in Phase 2 — gentle nudge of a pretrained LM
-    # Price-encoder backbone lr in Phase 2. Kept SEPARATE from lr_adapter on
-    # purpose: the ``transformer`` backend is trained FROM SCRATCH, so the 3e-5
-    # rate (meant for a pretrained LM's LoRA) barely moves random weights in a
-    # couple thousand steps (Run 1 failure). A from-scratch backbone needs a
-    # higher rate. Run 2 tried 1e-4 — encoder learned but drifted training
-    # representations faster than ema_decay=0.999 (~1000-step window) can smooth,
-    # causing val_jepa to rise monotonically. Conservative step: 5e-5 paired with
-    # ema_decay=0.999 (see research_log 2026-06-04_run2-phase2-drift). For a
-    # frozen pretrained Moirai backbone this param group is empty and unused.
-    lr_encoder: float = 5e-5
+    lr_adapter: float = 5e-5  # was 3e-5; predictor was also undertrained at 2000 steps
+    # Price-encoder backbone lr in Phase 2. Kept SEPARATE from lr_adapter.
+    # Run 1: 3e-5 shared with LoRA → encoder barely moved. Run 2: 1e-4 → drifted
+    # too fast for 1500-step cosine schedule. Run 3: 5e-5 → val_jepa turned over
+    # at step 2000 but LR was already at floor. Run 4: back to 1e-4 with 4500-step
+    # cosine decay — peak LR sustained long enough to actually train the encoder.
+    # For frozen pretrained Moirai backbone this group is empty and unused.
+    lr_encoder: float = 1e-4
     # LR schedule (warmup -> cosine) applied per param group for stability when a
     # from-scratch backbone switches on. Each group ramps linearly from 0 over
     # ``lr_warmup_steps`` starting at the step it becomes active (Phase 2 for the
