@@ -1,9 +1,12 @@
 """Evaluation utilities for JEPA-quant checkpoints.
 
-Stage 0 diagnostics: shuffled-target control, baselines, collapse audit,
-level-dependence test, regime clustering.
+Stage 0 diagnostics (decides whether the JEPA loss is non-degenerate):
+shuffled-target control, baselines, collapse audit, level-dependence test,
+regime clustering.
 
-Stage 1 (linear probe): in linear_probe.py.
+Stage 1 linear probe (PRIMARY progress metric — quantifies downstream utility
+of z_price): ridge regression to future returns/volatility, logistic
+regression to future return direction.
 """
 
 from .diagnostics import (
@@ -14,6 +17,10 @@ from .diagnostics import (
     level_dependence_test,
     regime_clustering,
 )
+from .linear_probe import (
+    linear_probe_regression,
+    linear_probe_direction,
+)
 
 __all__ = [
     "load_checkpoint",
@@ -22,4 +29,6 @@ __all__ = [
     "collapse_audit",
     "level_dependence_test",
     "regime_clustering",
+    "linear_probe_regression",
+    "linear_probe_direction",
 ]
