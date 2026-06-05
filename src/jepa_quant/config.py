@@ -38,9 +38,11 @@ class PriceEncoderConfig:
     n_features: int = 6
     context_length: int = 64  # L — context window length
     # Lightweight transformer backend hyper-params (ignored for moirai).
-    d_model: int = 256
+    # d_model=512, n_layers=6: scaled up for L4 GPU (22.5 GB) — was 256/4,
+    # which left ~13 GB headroom unused. Adds ~150 MB VRAM, more expressive.
+    d_model: int = 512
     n_heads: int = 8
-    n_layers: int = 4
+    n_layers: int = 6
     dropout: float = 0.1
     # Output latent dim AFTER the projection head (shared by both backends).
     latent_dim: int = 256
