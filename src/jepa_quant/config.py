@@ -176,7 +176,7 @@ class TrainConfig:
     # point lr_enc is still ~7.9e-5 (89% of peak) instead of 5e-6 (10%).
     # lr_encoder returns to 1e-4 — safe now because the longer cosine decay
     # spreads the same total gradient work over 3x more steps.
-    max_steps: int = 5000
+    max_steps: int = 20000
     warmup_proj_steps: int = 500  # Phase 1: projections only, predictor adapters frozen
     lr_proj: float = 1e-4
     lr_adapter: float = 5e-5  # was 3e-5; predictor was also undertrained at 2000 steps
