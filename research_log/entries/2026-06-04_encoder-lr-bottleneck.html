@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="finding" content="From-scratch transformer encoder trains only in Phase 2 at LoRA's 3e-5 — too low; z_price stays ~random, val_jepa rises while val z_std falls. Fix: own lr_encoder=1e-4 on a warmup→cosine schedule.">
   <title>Encoder LR bottleneck: from-scratch price encoder starved at the LoRA rate | JEPA-Quant Log</title>
   <link rel="stylesheet" href="../assets/style.css">
 </head>
@@ -253,8 +254,9 @@ warmup_proj   : 500     max_steps 2000   jepa loss: 1 - cos(z_pred, z_target)</c
     <h2>Next Steps</h2>
     <ol>
       <li><strong>Done — implemented:</strong> split the encoder backbone into its own optimizer group with <code>lr_encoder = 1e-4</code> (separate from LoRA's <code>3e-5</code>), on a per-group warmup&rarr;cosine schedule (<code>lr_warmup_steps = 100</code>, <code>lr_min_factor = 0.1</code>) so the from-scratch backbone ramps in smoothly at Phase&nbsp;2 and decays late for stability.</li>
+      <li><strong>On the value <code>1e-4</code>:</strong> it's a deliberately <em>conservative</em> starting point for a 4-layer from-scratch transformer — roughly 3&times; the old LoRA rate, enough to actually move random weights, but low enough to keep the Phase-2 transition stable rather than risk a second failure mode (a hot encoder thrashing the EMA target it's also feeding). The reasoning: change one variable at a time, and pick the smaller of two plausible rates first so a clean re-run isolates "was the LR the bottleneck?" from "did we overshoot?". If the re-run's <code>val_jepa</code> still looks sluggish (slow to turn over, or turning but shallow) with a healthy <code>lr_enc</code> trace, <code>lr_encoder = 2e-4</code> is the next thing to try before reaching for structural changes.</li>
       <li><strong>Re-run</strong> the baseline with the new schedule; confirm <code>val_jepa</code> now <em>decreases</em> and <code>val z_std</code> holds. Log the LR trace (<code>lr_enc</code>) that the trainer now prints.</li>
-      <li>If val still degrades with a healthy encoder LR, suspect data (too few regimes) or VICReg diversity — run PCA/UMAP on val <code>z_price</code> and compare against the soft-codebook bottleneck.</li>
+      <li>If val still degrades <em>with</em> a healthy encoder LR (i.e. <code>1e-4</code>, and a <code>2e-4</code> bump didn't help either), the LR was not the binding constraint and the next suspect is the <strong>data</strong> — too few distinct market regimes for the representation to separate. Per the entry's open question above, run a <strong>PCA/UMAP of val <code>z_price</code></strong> to see whether held-out embeddings cluster by regime or smear into one blob, and compare against the soft-codebook bottleneck.</li>
       <li>Consider whether the encoder should train from Phase 1 (no warmup gap) rather than waiting for step 500.</li>
     </ol>
   </section>

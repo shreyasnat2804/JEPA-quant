@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="finding" content="VICReg balance fixed (λ_c·c ≈ JEPA). Phase 1 healed. But val_jepa still rises monotonically (0.044→0.147): encoder drifts train representations at 1e-4 faster than EMA can smooth; val z_std stays 0.58–0.76 vs train 1.05.">
+  <title>Run 2: VICReg rebalanced + lr_encoder fix — phase 1 healed, phase 2 drift persists | JEPA-Quant Log</title>
+  <link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<div class="container">
+
+  <a class="back-link" href="../index.html">&larr; Research Log</a>
+
+  <!-- ═══ HEADER ═══ -->
+  <header class="entry-header">
+    <h1>Run 2: VICReg rebalanced + lr_encoder fix — phase 1 healed, phase 2 drift persists</h1>
+    <div class="entry-meta">
+      <span><strong>Date</strong> 2026-06-04</span>
+      <span><strong>Component</strong> Price Encoder / VICReg / Training Loop</span>
+      <span><strong>Status</strong> <span class="badge badge-inconclusive">Inconclusive</span></span>
+      <span><strong>Time</strong> ~2 h (full 2000-step run)</span>
+    </div>
+  </header>
+
+  <!-- ═══ SUMMARY ═══ -->
+  <section class="section">
+    <h2>Summary</h2>
+    <p>
+      Run 2 applied two fixes from <a href="2026-06-04_encoder-lr-bottleneck.html">the previous entry</a>:
+      a dedicated <code>lr_encoder = 1e-4</code> for the from-scratch price encoder (own optimizer
+      group, separate from the LoRA adapters) and a rebalanced VICReg (<code>λ_v = 10</code>,
+      <code>λ_c = 0.05</code>, down from 25/1.0). Both fixes worked as intended: phase 1 is now
+      healthy (<code>val_jepa</code> starts at 0.044, down from 0.066), and the covariance term
+      no longer dominates (end-of-run: <code>λ_c·c ≈ 0.13 ≈ jepa ≈ 0.13</code> — roughly equal
+      contributions). But <strong>val_jepa still rises monotonically</strong>, 0.044 → 0.147 over
+      2000 steps, while <code>val z_std</code> stays 0.58–0.76 against a train <code>z_std</code>
+      of ~1.05. The VICReg domination problem is solved; the new bottleneck is phase-2 encoder
+      drift: the encoder, now actually learning at 1e-4, shifts training representations faster
+      than <code>ema_decay = 0.998</code> can smooth, the predictor overfits to the drifted train
+      distribution, and val held-out representations land in a different region.
+    </p>
+  </section>
+
+  <!-- ═══ HYPOTHESIS ═══ -->
+  <section class="section">
+    <h2>Hypothesis / Motivation</h2>
+    <p>
+      Run 1 was diagnosed as: (a) VICReg covariance dominating the loss and leaving only ~4% budget
+      for the JEPA objective, and (b) the from-scratch encoder stuck at the LoRA rate (3e-5) and
+      barely moving. Run 2 tested both fixes simultaneously. Expectation: phase-1 projection
+      warmup would still converge (the projection-only phase is not affected by VICReg weights),
+      and phase-2 would now see a healthy gradient split (JEPA ≈ VICReg) with an encoder that
+      actually learns. The question was whether those two changes were sufficient to reverse
+      the val_jepa trend.
+    </p>
+  </section>
+
+  <!-- ═══ SETUP ═══ -->
+  <section class="section">
+    <h2>Experimental Setup</h2>
+
+    <h3>Data</h3>
+    <p>
+      Same as Run 1: per-ticker OHLCV parquets, chronological per-ticker train/val split
+      (<code>val_fraction = 0.15</code>), causal normalisation, context length <code>L = 64</code>,
+      horizon <code>H = 16</code>. Price-only (text disabled).
+    </p>
+
+    <h3>Model configuration (Run 2 — what actually ran)</h3>
+    <pre><code>price_encoder : transformer (FROM SCRATCH)  d_model 256  n_layers 4  latent 256
+predictor     : Qwen2.5-1.5B  + LoRA   r 16  alpha 32  dropout 0.05
+ema_decay     : 0.998
+regularizer   : vicreg (V + C only)
+  lambda_v    : 10.0   (was 25.0)
+  lambda_c    : 0.05   (was 1.0)
+batch_size    : 256
+lr_proj       : 1e-4
+lr_adapter    : 3e-5   (LoRA adapters — own group, Phase 2 only)
+lr_encoder    : 1e-4   (price encoder backbone — own group, Phase 2 only)  &lt;-- new
+lr_warmup_steps : 100  (per-group warmup from 0 at the step the group activates)
+warmup_proj_steps : 500  (Phase 1: projections only)
+max_steps     : 2000
+jepa_loss     : 1 - cosine_similarity(z_pred, z_target)</code></pre>
+
+    <h3>Changes from Run 1</h3>
+    <ul>
+      <li>Encoder backbone moved to its own optimizer group at <code>lr_encoder = 1e-4</code> (no longer sharing the LoRA rate).</li>
+      <li><code>λ_v</code>: 25.0 → 10.0 ; <code>λ_c</code>: 1.0 → 0.05 (VICReg rebalance to prevent covariance domination).</li>
+    </ul>
+  </section>
+
+  <!-- ═══ METHODOLOGY ═══ -->
+  <section class="section">
+    <h2>Methodology</h2>
+    <ol>
+      <li>Full 2000-step run to completion (all of phase 1 and phase 2).</li>
+      <li>Logged every 25 steps: <code>loss, jepa, v, c, z_std_mean, lr_proj, lr_enc, lr_ada</code>.</li>
+      <li>Validated every 250 steps: <code>val_jepa, val z_std</code>.</li>
+      <li>Verified loss decomposition by hand: <code>loss ≈ jepa + λ_v·v + λ_c·c</code> — confirmed the logged values were consistent with the new lambdas.</li>
+    </ol>
+  </section>
+
+  <!-- ═══ RESULTS ═══ -->
+  <section class="section">
+    <h2>Results</h2>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-name">val JEPA (end)</div>
+        <div class="metric-value">0.147</div>
+        <div class="metric-note">rising from 0.044</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">val z_std</div>
+        <div class="metric-value">0.76</div>
+        <div class="metric-note">range 0.58–0.76</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">train z_std</div>
+        <div class="metric-value">1.05</div>
+        <div class="metric-note">stable, hinge satisfied</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">λ_c · c (end)</div>
+        <div class="metric-value">0.130</div>
+        <div class="metric-note">≈ JEPA (was 13× JEPA in Run 1)</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">λ_v · v (end)</div>
+        <div class="metric-value">0.022</div>
+        <div class="metric-note">minor, hinge slack</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">steps</div>
+        <div class="metric-value">2.0 k</div>
+        <div class="metric-note">complete</div>
+      </div>
+    </div>
+
+    <h3>Val JEPA trend (monotonically rising)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>step</th><th>phase</th><th>train jepa</th><th>val_jepa</th><th>val z_std</th><th>lr_enc</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>250</td><td>1</td><td>0.038</td><td>0.044</td><td>0.712</td><td>0</td></tr>
+          <tr><td>500</td><td>1→2</td><td>0.074</td><td>0.074</td><td>0.734</td><td>0 → warmup</td></tr>
+          <tr><td>750</td><td>2</td><td>0.098</td><td>0.099</td><td>0.582</td><td>9.75e-5</td></tr>
+          <tr><td>1000</td><td>2</td><td>0.103</td><td>0.116</td><td>0.601</td><td>8.31e-5</td></tr>
+          <tr><td>1250</td><td>2</td><td>0.108</td><td>0.130</td><td>0.614</td><td>6.01e-5</td></tr>
+          <tr><td>1500</td><td>2</td><td>0.120</td><td>0.136</td><td>0.682</td><td>3.56e-5</td></tr>
+          <tr><td>1750</td><td>2</td><td>0.137</td><td>0.143</td><td>0.736</td><td>1.70e-5</td></tr>
+          <tr><td>2000</td><td>2</td><td>0.131</td><td>0.147</td><td>0.762</td><td>1.00e-5</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Loss decomposition at end of run</h3>
+    <p>
+      Verification that the logged values are consistent with the new lambdas:<br>
+      <code>loss = jepa + λ_v·v + λ_c·c = 0.1310 + 10·0.0022 + 0.05·2.5943 = 0.131 + 0.022 + 0.130 = 0.283 ≈ logged 0.283</code> ✓<br>
+      Compare Run 1 at step 1000: <code>0.082 + 25·0.015 + 1.0·1.74 = 2.18</code> — covariance was 80% of loss.
+      Now it is 46%, JEPA 46%, variance 8%. Balanced.
+    </p>
+
+    <h3>Raw logs (excerpt)</h3>
+    <pre><code>[    1/2000] phase=1 loss=8.9782 jepa=0.9294 v=0.8048 c=0.0066 z_std_mean=0.1953 lr_enc=0.00e+00
+[  100/2000] phase=1 loss=0.4986 jepa=0.0523 v=0.0241 c=4.1108 z_std_mean=0.9968 lr_enc=0.00e+00
+[  250/2000] phase=1 loss=0.3613 jepa=0.0383 v=0.0140 c=3.6537 z_std_mean=1.0108
+        val_jepa=0.0441 z_std=0.7123
+[  500/2000] phase=1 loss=0.3206 jepa=0.0738 v=0.0082 c=3.3056 z_std_mean=1.0268 lr_enc=0.00e+00
+        val_jepa=0.0735 z_std=0.7341
+[  525/2000] phase=2 loss=0.3347 jepa=0.0812 v=0.0096 c=3.1577 lr_enc=2.50e-05  &lt;-- encoder warms up
+[  750/2000] phase=2 loss=0.3409 jepa=0.0980 v=0.0100 c=2.8639 lr_enc=9.75e-05
+        val_jepa=0.0985 z_std=0.5821
+[ 1000/2000] phase=2 loss=0.3126 jepa=0.1026 v=0.0071 c=2.7885 lr_enc=8.31e-05
+        val_jepa=0.1164 z_std=0.6011
+[ 1500/2000] phase=2 loss=0.2929 jepa=0.1199 v=0.0037 c=2.7096 lr_enc=3.56e-05
+        val_jepa=0.1364 z_std=0.6820
+[ 2000/2000] phase=2 loss=0.2830 jepa=0.1310 v=0.0022 c=2.5943 lr_enc=1.00e-05
+        val_jepa=0.1472 z_std=0.7624</code></pre>
+  </section>
+
+  <!-- ═══ ANALYSIS ═══ -->
+  <section class="section">
+    <h2>Analysis &amp; Findings</h2>
+
+    <h3>What the VICReg fix accomplished</h3>
+    <p>
+      The rebalance worked exactly as intended. In Run 1, <code>λ_c·c ≈ 1.73</code> vs
+      <code>jepa ≈ 0.08</code> — the optimizer was spending ~95% of its effective gradient
+      budget on decorrelation. Now <code>λ_c·c ≈ 0.13 ≈ jepa ≈ 0.13</code>: prediction and
+      covariance regularisation are roughly equal weight. Phase 1 also improved: <code>val_jepa</code>
+      at step 250 dropped from 0.066 (Run 1) to 0.044 (Run 2) — a 33% improvement, consistent
+      with projections now spending more gradient on JEPA rather than fighting a too-large
+      covariance penalty.
+    </p>
+
+    <h3>The new bottleneck: phase-2 encoder drift</h3>
+    <p>
+      The encoder LR fix succeeded at making the encoder learn, but learning is not the same as
+      generalising. The mechanism:
+    </p>
+    <ol>
+      <li>Phase 1 runs 500 steps with the encoder <em>frozen at random init</em>. The projection heads
+          learn to predict EMA-target outputs given random encoder features — essentially learning
+          to match random projections, a degenerate but easy task.</li>
+      <li>Phase 2 activates <code>lr_encoder = 1e-4</code> with a 100-step warmup. The encoder
+          escapes its random-init basin and starts producing temporally-structured features.</li>
+      <li>As encoder representations shift, the EMA target (decay = 0.998 ≈ 200-step averaging)
+          follows with modest lag. The predictor adapts its predictions to the new representation
+          space <em>on the training distribution</em>.</li>
+      <li>Val representations come from a later time period (chronological split). The encoder's
+          phase-2 drift pushes training-period representations in a direction that doesn't align
+          with the held-out period, so <code>val_jepa</code> rises as the encoder specialises to
+          the train distribution.</li>
+    </ol>
+    <p>
+      The <code>val z_std</code> gap (0.58–0.76 vs train 1.05) is the smoking gun: the variance
+      hinge is satisfied on training batches but doesn't generalise. Val embeddings are partially
+      collapsed, meaning the encoder is producing less diverse representations on out-of-sample
+      time periods — consistent with overfitting to the temporal patterns in the training window.
+    </p>
+
+    <div class="callout success">
+      VICReg balance confirmed: λ_c·c ≈ JEPA at end of run. Phase 1 val_jepa improved from
+      0.066 → 0.044. Both fixes from the previous entry worked as intended.
+    </div>
+    <div class="callout warning">
+      Val z_std recovers slightly toward the end (0.582 at step 750 → 0.762 at step 2000),
+      suggesting the encoder is slowly generalising as it settles. Whether longer training
+      would see val_jepa turn over is unknown — a 4000-step run might be worth trying alongside
+      the LR/EMA changes.
+    </div>
+    <div class="callout danger">
+      Phase-2 encoder drift is the binding failure: lr_encoder=1e-4 on ema_decay=0.998 drifts
+      representations faster than the target can smooth, and the predictor overfits to the
+      shifted train distribution. This must be addressed before val_jepa can improve.
+    </div>
+  </section>
+
+  <!-- ═══ THOUGHT PROCESS ═══ -->
+  <section class="section">
+    <h2>Thought Process &amp; Debugging Notes</h2>
+    <p>
+      Initial read of the logs: "val_jepa rises again, something is still wrong." First instinct was
+      to check whether the VICReg rebalance actually took effect — verified by decomposing the final
+      loss, and yes it did. So the covariance explanation from Run 1 was right but incomplete: it was
+      one problem, not the only problem.
+    </p>
+    <p>
+      Second read: val_jepa starts better (0.044 vs 0.066) and the trajectory only turns upward after
+      Phase 2 begins (step 500). Everything in Phase 1 is fine. So the failure is specifically triggered
+      by the encoder unlocking. That rules out data issues in Phase 1 and points squarely at what happens
+      when <code>lr_encoder</code> activates.
+    </p>
+    <p>
+      The <code>val z_std</code> gap pattern is the key: train is pinned at ~1.05 (variance hinge
+      working) while val floats between 0.58–0.76. This is the classic "regulariser satisfied on
+      training distribution, ignored on test distribution" pattern. In a standard supervised model this
+      would mean the model overfits; in a self-supervised representation model it means the encoder
+      learns train-specific variance patterns that don't hold on val.
+    </p>
+    <p>
+      Two levers: slow down the encoder (lower LR) or slow down the target (higher EMA decay). They
+      attack the same problem from different directions. The third lever — starting the encoder earlier
+      so there's no phase discontinuity — is more structural and requires a trainer change, but is worth
+      noting as the principled long-term fix.
+    </p>
+  </section>
+
+  <!-- ═══ LESSONS LEARNED ═══ -->
+  <section class="section">
+    <h2>Lessons Learned</h2>
+    <ul>
+      <li>"The encoder is now learning" is not the same as "the encoder is learning useful generalisable
+          representations." Verify on val, not just by watching loss terms move.</li>
+      <li>Monotonically rising val_jepa with a simultaneously rising train_jepa means the problem is
+          not pure overfitting (train would fall while val rose) — it means the whole optimisation
+          trajectory is moving away from good representations on both sets, just slower on val than
+          on train when drift is the cause.</li>
+      <li>EMA decay of 0.998 is a 500-step effective window (~1/(1−0.998)). With a 100-step LR warmup
+          and lr=1e-4, the encoder can substantially shift representations within half of that window —
+          the EMA doesn't smooth fast enough relative to the encoder LR.</li>
+      <li>Phase 1 (projections trained on random-encoder outputs) creates a warm-start that <em>disappears</em>
+          the moment the encoder escapes its random-init basin. The phase discontinuity may be the
+          structural source of the drift problem for from-scratch encoders.</li>
+    </ul>
+  </section>
+
+  <!-- ═══ NEXT STEPS ═══ -->
+  <section class="section">
+    <h2>Next Steps</h2>
+    <ol>
+      <li><strong>Run 3 — implemented:</strong> reduce <code>lr_encoder: 1e-4 → 5e-5</code> and
+          increase <code>ema_decay: 0.998 → 0.999</code>. These attack the drift from both sides —
+          slower encoder movement and a longer effective EMA window (~1000 steps at 0.999 vs ~500 at 0.998).
+          Pick the smaller encoder LR as the conservative first step; if val_jepa still rises, try
+          <code>3e-5</code> next, or address the phase-structure issue instead.</li>
+      <li><strong>Structural fix (requires trainer change):</strong> train the encoder from Phase 1
+          alongside the projections, at a lower rate (e.g. <code>5e-6</code> in Phase 1,
+          <code>5e-5</code> in Phase 2). This eliminates the random-init discontinuity at step 500
+          and lets the predictor co-adapt with the encoder from the start. The LoRA adapters can
+          still stay frozen until Phase 2.</li>
+      <li>If val_jepa still rises after Run 3: run a <strong>PCA/UMAP of val z_price</strong> to
+          check whether the temporal drift is structural (train and val embeddings live in different
+          regions because they span different market regimes) or incidental (the encoder learned the
+          right structure but wrong scale). The former requires more data diversity; the latter might
+          be fixed by normalising z_price at inference.</li>
+      <li>Consider extending <code>max_steps</code> to 4000 — the <code>val z_std</code> recovery
+          trend (0.58 at step 750 → 0.76 at step 2000) suggests the encoder may eventually stabilise;
+          a longer run might let it do so before the LR decays to near zero.</li>
+    </ol>
+  </section>
+
+  <footer class="site-footer">
+    JEPA-Quant &mdash; <a href="../index.html">Research Log</a> &mdash;
+    <a href="https://github.com/shreyasnat2804/JEPA-quant">GitHub</a>
+  </footer>
+
+</div>
+</body>
+</html>

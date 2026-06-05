@@ -14,22 +14,22 @@
     <p class="subtitle">Iterative experiment findings &mdash; what worked, what didn&rsquo;t, and why</p>
   </header>
 
-  <!-- Update these counts manually as you add entries -->
+  <!-- Counts are computed from the entries at load time — do not edit by hand. -->
   <section class="stats">
-    <div class="stat"><span class="num">1</span><span class="label">Total</span></div>
-    <div class="stat"><span class="num">0</span><span class="label">Success</span></div>
-    <div class="stat"><span class="num">1</span><span class="label">Failed</span></div>
-    <div class="stat"><span class="num">0</span><span class="label">Ongoing</span></div>
-    <div class="stat"><span class="num">0</span><span class="label">Inconclusive</span></div>
+    <div class="stat"><span class="num" id="stat-total">&mdash;</span><span class="label">Total</span></div>
+    <div class="stat"><span class="num" id="stat-success">&mdash;</span><span class="label">Success</span></div>
+    <div class="stat"><span class="num" id="stat-failed">&mdash;</span><span class="label">Failed</span></div>
+    <div class="stat"><span class="num" id="stat-ongoing">&mdash;</span><span class="label">Ongoing</span></div>
+    <div class="stat"><span class="num" id="stat-inconclusive">&mdash;</span><span class="label">Inconclusive</span></div>
   </section>
 
   <section>
     <h2>How to add an entry</h2>
     <ol style="margin: 0 0 1.5rem 1.5rem; font-size: 0.9rem; color: var(--text-muted);">
       <li>Copy <code>template.html</code> to <code>entries/YYYY-MM-DD_short-title.html</code></li>
-      <li>Fill in every section (hypothesis, setup, results, images, next steps)</li>
+      <li>Fill in every section, including the <code>&lt;meta name="finding"&gt;</code> one-liner in the page <code>&lt;head&gt;</code></li>
       <li>Drop images into <code>assets/images/</code> and reference them as <code>../assets/images/filename.png</code></li>
-      <li>Add a row to the table below and update the stat counts above</li>
+      <li>Add the new filename to <code>entries/manifest.json</code> &mdash; the table and counts below update automatically</li>
     </ol>
   </section>
 
@@ -46,31 +46,8 @@
             <th>Key Finding</th>
           </tr>
         </thead>
-        <tbody>
-          <!--
-            Row template — copy and fill in:
-
-            <tr>
-              <td>2026-06-02</td>
-              <td><a href="entries/YYYY-MM-DD_short-title.html">Short title</a></td>
-              <td>Price Encoder</td>
-              <td><span class="badge badge-ongoing">Ongoing</span></td>
-              <td>One-sentence key finding or null result.</td>
-            </tr>
-
-            Status badges: badge-success  badge-failed  badge-ongoing  badge-inconclusive
-
-            Component options:
-              Price Encoder · Text Encoder · Target Encoder · Predictor ·
-              VICReg · Codebook · Training Loop · Data Pipeline · Evaluation
-          -->
-          <tr>
-            <td>2026-06-04</td>
-            <td><a href="entries/2026-06-04_encoder-lr-bottleneck.html">Encoder LR bottleneck: from-scratch encoder starved at the LoRA rate</a></td>
-            <td>Price Encoder</td>
-            <td><span class="badge badge-failed">Failed</span></td>
-            <td>From-scratch transformer encoder trains only in Phase 2 at LoRA's 3e-5 &mdash; too low; z_price stays ~random, val_jepa rises while val z_std falls. Fix: own lr_encoder=1e-4 on a warmup&rarr;cosine schedule.</td>
-          </tr>
+        <tbody id="entry-rows">
+          <tr><td colspan="5" style="color: var(--text-muted);">Loading entries&hellip;</td></tr>
         </tbody>
       </table>
     </div>
@@ -81,5 +58,134 @@
   </footer>
 
 </div>
+
+<script>
+  // Dynamic index: read the manifest, parse each entry's own metadata, then
+  // render the table and stat counts. The entry HTML is the single source of
+  // truth — index.html holds no per-entry data.
+  const ENTRIES_DIR = 'entries/';
+  const MANIFEST = ENTRIES_DIR + 'manifest.json';
+  const STATUS_ORDER = ['Success', 'Failed', 'Ongoing', 'Inconclusive'];
+
+  document.addEventListener('DOMContentLoaded', loadEntries);
+
+  async function loadEntries() {
+    try {
+      const manifest = await fetchJson(MANIFEST);
+      const files = Array.isArray(manifest) ? manifest : (manifest.entries || []);
+      const parsed = await Promise.all(files.map(parseEntry));
+      const entries = parsed
+        .filter(Boolean)
+        .sort((a, b) => b.date.localeCompare(a.date)); // newest first
+      renderTable(entries);
+      renderStats(entries);
+    } catch (err) {
+      showError(err);
+    }
+  }
+
+  async function fetchJson(url) {
+    const res = await fetch(url, { cache: 'no-cache' });
+    if (!res.ok) throw new Error(url + ' → HTTP ' + res.status);
+    return res.json();
+  }
+
+  async function parseEntry(file) {
+    try {
+      const res = await fetch(ENTRIES_DIR + file, { cache: 'no-cache' });
+      if (!res.ok) throw new Error(file + ' → HTTP ' + res.status);
+      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+
+      const metaSpan = (label) => {
+        for (const span of doc.querySelectorAll('.entry-meta span')) {
+          const strong = span.querySelector('strong');
+          if (strong && strong.textContent.trim().toLowerCase() === label) return span;
+        }
+        return null;
+      };
+      const valueOf = (span) => {
+        if (!span) return '';
+        const strong = span.querySelector('strong');
+        const label = strong ? strong.textContent : '';
+        return span.textContent.replace(label, '').trim();
+      };
+
+      const statusSpan = metaSpan('status');
+      const badge = statusSpan && statusSpan.querySelector('.badge');
+      const statusLabel = badge ? badge.textContent.trim() : 'Unknown';
+      const statusClass = badge
+        ? Array.from(badge.classList).find((c) => c.startsWith('badge-')) || ''
+        : '';
+
+      const findingMeta = doc.querySelector('meta[name="finding"]');
+      let finding = findingMeta ? findingMeta.getAttribute('content').trim() : '';
+      if (!finding) {
+        const p = doc.querySelector('.section p');
+        finding = p ? p.textContent.trim().replace(/\s+/g, ' ') : '';
+      }
+
+      return {
+        file,
+        date: valueOf(metaSpan('date')) || '0000-00-00',
+        component: valueOf(metaSpan('component')) || '—',
+        statusLabel,
+        statusClass,
+        title: (doc.querySelector('h1') ? doc.querySelector('h1').textContent : file).trim(),
+        finding,
+      };
+    } catch (err) {
+      console.error('Skipping unreadable entry:', file, err);
+      return null;
+    }
+  }
+
+  function renderTable(entries) {
+    const tbody = document.getElementById('entry-rows');
+    if (!entries.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted);">No entries yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = entries.map((e) => `
+      <tr>
+        <td>${esc(e.date)}</td>
+        <td><a href="${ENTRIES_DIR}${encodeURI(e.file)}">${esc(e.title)}</a></td>
+        <td>${esc(e.component)}</td>
+        <td><span class="badge ${esc(e.statusClass)}">${esc(e.statusLabel)}</span></td>
+        <td>${esc(e.finding)}</td>
+      </tr>`).join('');
+  }
+
+  function renderStats(entries) {
+    const counts = Object.fromEntries(STATUS_ORDER.map((s) => [s, 0]));
+    for (const e of entries) {
+      if (counts[e.statusLabel] !== undefined) counts[e.statusLabel] += 1;
+    }
+    setNum('stat-total', entries.length);
+    setNum('stat-success', counts.Success);
+    setNum('stat-failed', counts.Failed);
+    setNum('stat-ongoing', counts.Ongoing);
+    setNum('stat-inconclusive', counts.Inconclusive);
+  }
+
+  function setNum(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function showError(err) {
+    console.error(err);
+    document.getElementById('entry-rows').innerHTML =
+      '<tr><td colspan="5" style="color: var(--text-muted);">Could not load entries (' +
+      esc(String(err && err.message ? err.message : err)) +
+      '). If you opened this file directly, serve it over HTTP instead &mdash; e.g. run ' +
+      '<code>python3 -m http.server</code> inside <code>research_log/</code> &mdash; ' +
+      'because browsers block <code>fetch()</code> on the <code>file://</code> protocol.</td></tr>';
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+</script>
 </body>
 </html>

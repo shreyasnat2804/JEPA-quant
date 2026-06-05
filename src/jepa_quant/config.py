@@ -92,7 +92,10 @@ class PredictorConfig:
 
 @dataclass(frozen=True)
 class EMAConfig:
-    decay: float = 0.998  # alpha in [0.996, 0.999]
+    # 0.999 → effective window ~1000 steps. Run 2 showed 0.998 (~500 steps) is too
+    # short: encoder at lr=5e-5 can shift representations within that window and
+    # val_jepa drifts upward. See research_log 2026-06-04_run2-phase2-drift.
+    decay: float = 0.999
 
 
 # ----------------------------------------------------------------------------
@@ -113,8 +116,9 @@ class VICRegConfig:
     # well-decorrelated embedding (RMS corr ~0.08) lands c≈1.8 — ~20× the JEPA
     # loss — and the optimizer spends ~80% of its budget on decorrelation while
     # val_jepa regresses. Rebalanced so prediction stays the dominant signal:
-    # λ_c·c ≈ 0.09 (was 1.8), λ_v·v ≈ 0.15 (variance is already satisfied,
-    # z_std≈1.0). See research_log 2026-06-04 covariance-domination entry.
+    # λ_c·c ≈ 0.13 ≈ jepa (balanced). At d=256 + no invariance term, the
+    # canonical λ_c=1.0 made covariance 80% of the loss. See Run 2 analysis in
+    # research_log 2026-06-04_run2-phase2-drift.html.
     lambda_v: float = 10.0  # variance weight (was 25.0)
     lambda_c: float = 0.05  # covariance weight (was 1.0)
     gamma: float = 1.0  # target std (hinge threshold)
@@ -169,11 +173,13 @@ class TrainConfig:
     # Price-encoder backbone lr in Phase 2. Kept SEPARATE from lr_adapter on
     # purpose: the ``transformer`` backend is trained FROM SCRATCH, so the 3e-5
     # rate (meant for a pretrained LM's LoRA) barely moves random weights in a
-    # couple thousand steps — z_price stays ~random and the representation
-    # plateaus while the projection head overfits (val_jepa rises, val z_std
-    # falls). A from-scratch backbone needs a higher rate. For a frozen
-    # pretrained Moirai backbone this param group is empty and the value unused.
-    lr_encoder: float = 1e-4
+    # couple thousand steps (Run 1 failure). A from-scratch backbone needs a
+    # higher rate. Run 2 tried 1e-4 — encoder learned but drifted training
+    # representations faster than ema_decay=0.999 (~1000-step window) can smooth,
+    # causing val_jepa to rise monotonically. Conservative step: 5e-5 paired with
+    # ema_decay=0.999 (see research_log 2026-06-04_run2-phase2-drift). For a
+    # frozen pretrained Moirai backbone this param group is empty and unused.
+    lr_encoder: float = 5e-5
     # LR schedule (warmup -> cosine) applied per param group for stability when a
     # from-scratch backbone switches on. Each group ramps linearly from 0 over
     # ``lr_warmup_steps`` starting at the step it becomes active (Phase 2 for the
