@@ -18,6 +18,7 @@ without string-matching parameter names.
 
 from __future__ import annotations
 
+import math
 from typing import Iterator
 
 import torch
@@ -82,6 +83,12 @@ class TransformerPriceEncoder(PriceEncoder):
             activation="gelu",
         )
         self.backbone = nn.TransformerEncoder(layer, num_layers=cfg.n_layers)
+        # GPT-2 scaled init: bound residual stream variance accumulation with depth.
+        scale = 1.0 / math.sqrt(2 * cfg.n_layers)
+        with torch.no_grad():
+            for enc_layer in self.backbone.layers:
+                enc_layer.self_attn.out_proj.weight.mul_(scale)
+                enc_layer.linear2.weight.mul_(scale)
         self.head = ProjectionHead(cfg.d_model, cfg.latent_dim, hidden_dim=cfg.latent_dim)
         self._frozen_backbone = cfg.freeze_backbone
         if cfg.freeze_backbone:

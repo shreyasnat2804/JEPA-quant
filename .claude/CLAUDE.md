@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **Cost is not a concern.** The user is on a monthly (flat-rate) plan, so session cost warnings are irrelevant here — do not factor spend into decisions, suggest cheaper shortcuts to save money, or wrap up early to limit cost. Optimize purely for correctness and getting the task done well.
 
+> **Colab compute budget: 250 compute units/month.** Treat GPU-hours as a limited resource — prefer efficient training runs, avoid redundant full re-trains, and don't burn units on debugging that can be done CPU-side first.
+
 ## Architecture
 
 Three-component JEPA system. See [`docs/architecture.html`](docs/architecture.html) for the data flow diagram.
