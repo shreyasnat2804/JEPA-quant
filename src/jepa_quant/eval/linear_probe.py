@@ -35,7 +35,7 @@ Decision rule (applied in the notebook, not enforced here):
 from __future__ import annotations
 
 import dataclasses
-from typing import Literal, Optional, Sequence
+from typing import Callable, Literal, Optional, Sequence
 
 import numpy as np
 import torch
@@ -65,6 +65,14 @@ RegressionTarget = Literal["future_return", "future_volatility"]
 # signal that the frozen backbone preserved (see Test 4 in nb03c).
 ProbeSource = Literal["z_price", "backbone"]
 
+# A feature extractor for the probe. Maps a per-sample-normalized context window
+# ``[B, L, F]`` (already on ``device``) to a representation ``[B, D]``. The
+# encode_fn owns its own model's device/eval placement; the collector only moves
+# the input to ``device`` and the output to CPU. This is the seam that lets the
+# probe harness score arbitrary backbones (z_price, frozen TimesFM, raw
+# hand-crafted features) through one identical fitting path.
+EncodeFn = Callable[[Tensor], Tensor]
+
 
 # ==========================================================================
 # Data collection
@@ -91,6 +99,76 @@ def _build_split_loader(cfg: JEPAConfig, split: str, normalize: bool) -> DataLoa
     )
 
 
+def _collect_probe_pairs_fn(
+    encode_fn: EncodeFn,
+    cfg: JEPAConfig,
+    split: str,
+    n_batches: int,
+    device: torch.device,
+) -> dict[str, Tensor]:
+    """Run ``encode_fn`` over ``split`` and return features + every probe target.
+
+    This is the source-agnostic collector: it knows nothing about JEPAComponents,
+    projection heads, or TimesFM — only that ``encode_fn`` maps a normalized
+    context window ``[B, L, F]`` to a representation ``[B, D]``. All probe targets
+    are derived here from the RAW (unnormalized) target windows so their scale is
+    comparable across samples and across feature extractors.
+
+    Returned tensors (all CPU float32 except ``y_sign`` which is long):
+        z            [N, D]  representation (per-sample-normalized context).
+        y_return     [N]     sum of close log-returns over horizon
+        y_sign       [N]     1 if y_return > 0 else 0
+        y_volatility [N]     std of close log-returns over horizon
+
+    The context is re-normalized here exactly as PriceWindowDataset does when
+    normalize=True (per-sample mean/std on the context only, +1e-6 floor), so any
+    encoder sees the training-time distribution. The input is moved to ``device``
+    before ``encode_fn`` is called; ``encode_fn`` is responsible for its model's
+    own device/eval placement and returns a tensor that is moved to CPU here.
+    """
+    loader = _build_split_loader(cfg, split, normalize=False)
+
+    zs: list[Tensor] = []
+    rets: list[Tensor] = []
+    signs: list[Tensor] = []
+    vols: list[Tensor] = []
+
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            if i >= n_batches:
+                break
+            ctx_raw = batch["context"]  # [B, L, F] raw log-returns
+            tgt_raw = batch["target"]   # [B, H, F] raw log-returns
+
+            tgt_close = tgt_raw[:, :, CLOSE_IDX]            # [B, H]
+            cum_ret = tgt_close.sum(dim=1)                  # [B] H-step log-return
+            sign = (cum_ret > 0).long()                     # [B] 0/1
+            vol = tgt_close.std(dim=1, unbiased=False)      # [B]
+
+            # Re-normalize context exactly as PriceWindowDataset does when
+            # normalize=True, so the encoder sees its training distribution.
+            mu = ctx_raw.mean(dim=1, keepdim=True)          # [B, 1, F]
+            sigma = ctx_raw.std(dim=1, keepdim=True) + 1e-6 # [B, 1, F]
+            ctx_norm = (ctx_raw - mu) / sigma
+
+            z = encode_fn(ctx_norm.to(device)).cpu()        # [B, D]
+
+            zs.append(z)
+            rets.append(cum_ret)
+            signs.append(sign)
+            vols.append(vol)
+
+    if not zs:
+        raise ValueError(f"No batches collected for split={split!r}")
+
+    return {
+        "z": torch.cat(zs).float(),
+        "y_return": torch.cat(rets).float(),
+        "y_sign": torch.cat(signs).long(),
+        "y_volatility": torch.cat(vols).float(),
+    }
+
+
 def _collect_probe_pairs(
     components: JEPAComponents,
     cfg: JEPAConfig,
@@ -99,17 +177,9 @@ def _collect_probe_pairs(
     device: torch.device,
     probe_source: ProbeSource = "z_price",
 ) -> dict[str, Tensor]:
-    """Run encoder over ``split`` and return latents + every probe target.
+    """Thin wrapper: build an ``encode_fn`` from ``components`` and delegate.
 
-    Returned tensors (all CPU float32 except ``y_sign`` which is long):
-        z            [N, D]  representation (per-sample-normalized context).
-                             D = latent_dim for ``probe_source="z_price"``,
-                             D = backbone hidden dim for ``probe_source="backbone"``.
-        y_return     [N]     sum of close log-returns over horizon
-        y_sign       [N]     1 if y_return > 0 else 0
-        y_volatility [N]     std of close log-returns over horizon
-
-    ``probe_source`` selects which representation populates ``z``:
+    ``probe_source`` selects which representation the encode_fn produces:
         "z_price"  — the encoder's returned post-projection latent.
         "backbone" — the PRE-projection ``pooled`` hidden state, captured via a
                      forward pre-hook on ``price_encoder.head``. We still run the
@@ -121,78 +191,44 @@ def _collect_probe_pairs(
                      already-projected ``[B, L+1, d_model]`` sequence, not raw
                      ``[B, L, F]`` features.
 
-    The encoder is moved to ``device`` and set to eval mode (idempotent —
-    callers may pre-load weights).
+    The hook is registered for the lifetime of this single-split collection and
+    removed in ``finally`` so repeated calls don't stack hooks on the shared
+    encoder module. The encoder is moved to ``device`` and set to eval mode
+    (idempotent — callers may pre-load weights).
     """
     if probe_source not in ("z_price", "backbone"):
         raise ValueError(
             f"probe_source must be 'z_price' or 'backbone', got {probe_source!r}"
         )
     components.price_encoder.to(device).eval()
-    loader = _build_split_loader(cfg, split, normalize=False)
 
-    # For the backbone probe, tap the input to the projection head. The hook
-    # signature is hook(module, args); pooled = args[0]. We stash it per-batch
-    # and remove the handle in the finally block so repeated calls don't stack
-    # hooks on the shared encoder module.
-    captured: dict[str, Tensor] = {}
-    hook_handle = None
-    if probe_source == "backbone":
-        def _capture_pre_head(_module, args):  # noqa: ANN001 — torch hook signature
-            captured["pooled"] = args[0]
-
-        hook_handle = components.price_encoder.head.register_forward_pre_hook(
-            _capture_pre_head
+    if probe_source == "z_price":
+        return _collect_probe_pairs_fn(
+            components.price_encoder, cfg, split, n_batches, device
         )
 
-    zs: list[Tensor] = []
-    rets: list[Tensor] = []
-    signs: list[Tensor] = []
-    vols: list[Tensor] = []
+    # Backbone probe: tap the input to the projection head. The hook signature is
+    # hook(module, args); pooled = args[0]. We run the full forward (hook fires)
+    # and return the captured pooled instead of the post-head z.
+    captured: dict[str, Tensor] = {}
+
+    def _capture_pre_head(_module, args):  # noqa: ANN001 — torch hook signature
+        captured["pooled"] = args[0]
+
+    hook_handle = components.price_encoder.head.register_forward_pre_hook(
+        _capture_pre_head
+    )
+
+    def _backbone_encode(x: Tensor) -> Tensor:
+        components.price_encoder(x)  # discard z; the hook stashes pooled
+        return captured["pooled"]
 
     try:
-        with torch.no_grad():
-            for i, batch in enumerate(loader):
-                if i >= n_batches:
-                    break
-                ctx_raw = batch["context"]  # [B, L, F] raw log-returns
-                tgt_raw = batch["target"]   # [B, H, F] raw log-returns
-
-                tgt_close = tgt_raw[:, :, CLOSE_IDX]            # [B, H]
-                cum_ret = tgt_close.sum(dim=1)                  # [B] H-step log-return
-                sign = (cum_ret > 0).long()                     # [B] 0/1
-                vol = tgt_close.std(dim=1, unbiased=False)      # [B]
-
-                # Re-normalize context exactly as PriceWindowDataset does when
-                # normalize=True, so the encoder sees its training distribution.
-                mu = ctx_raw.mean(dim=1, keepdim=True)          # [B, 1, F]
-                sigma = ctx_raw.std(dim=1, keepdim=True) + 1e-6 # [B, 1, F]
-                ctx_norm = (ctx_raw - mu) / sigma
-
-                # Always run the full forward so the pre-head hook fires. For
-                # probe_source="backbone" we use the captured pooled and discard
-                # the returned z; otherwise we use the returned z directly.
-                z_out = components.price_encoder(ctx_norm.to(device))
-                rep = captured["pooled"] if probe_source == "backbone" else z_out
-                z = rep.cpu()                                   # [B, D]
-
-                zs.append(z)
-                rets.append(cum_ret)
-                signs.append(sign)
-                vols.append(vol)
+        return _collect_probe_pairs_fn(
+            _backbone_encode, cfg, split, n_batches, device
+        )
     finally:
-        if hook_handle is not None:
-            hook_handle.remove()
-
-    if not zs:
-        raise ValueError(f"No batches collected for split={split!r}")
-
-    return {
-        "z": torch.cat(zs).float(),
-        "y_return": torch.cat(rets).float(),
-        "y_sign": torch.cat(signs).long(),
-        "y_volatility": torch.cat(vols).float(),
-    }
+        hook_handle.remove()
 
 
 # ==========================================================================
@@ -300,7 +336,138 @@ def _auroc(y_true: Tensor, scores: Tensor) -> float:
 
 
 # ==========================================================================
-# Public probes
+# Fitting — pure, operate on already-collected {z, y_*} dicts
+# ==========================================================================
+
+
+def _fit_regression(
+    train: dict[str, Tensor],
+    val: dict[str, Tensor],
+    target_kind: RegressionTarget,
+    ridge_alphas: Sequence[float],
+) -> dict:
+    """Ridge alpha-sweep over collected (z, target) pairs. Source-agnostic.
+
+    Returns the full result dict EXCEPT ``probe_source`` (the caller stamps that,
+    since it labels where ``z`` came from). All numbers depend only on the
+    contents of ``train``/``val`` and ``ridge_alphas`` — no randomness — so the
+    components path and the encode_fn path produce bit-identical output when fed
+    the same collected pairs.
+    """
+    y_key = "y_return" if target_kind == "future_return" else "y_volatility"
+    X_tr, X_va = _standardize(train["z"], val["z"])
+    y_tr = train[y_key]
+    y_va = val[y_key]
+
+    per_alpha: list[dict] = []
+    best_val_r2 = -float("inf")
+    best_alpha = float(ridge_alphas[0])
+    best_w: Optional[Tensor] = None
+    best_intercept = 0.0
+
+    for alpha in ridge_alphas:
+        w, intercept = _ridge_closed_form(X_tr, y_tr, alpha)
+        train_pred = X_tr @ w + intercept
+        val_pred = X_va @ w + intercept
+        train_r2 = _r2(y_tr, train_pred)
+        val_r2 = _r2(y_va, val_pred)
+        per_alpha.append(
+            {"alpha": float(alpha), "train_r2": train_r2, "val_r2": val_r2}
+        )
+        if val_r2 > best_val_r2:
+            best_val_r2 = val_r2
+            best_alpha = float(alpha)
+            best_w = w
+            best_intercept = intercept
+
+    assert best_w is not None
+    val_pred = X_va @ best_w + best_intercept
+    val_mse = float(((y_va - val_pred) ** 2).mean())
+    baseline_mse = float(((y_va - y_tr.mean()) ** 2).mean())  # predict train-mean
+    train_r2_at_best = next(p["train_r2"] for p in per_alpha if p["alpha"] == best_alpha)
+
+    out: dict = {
+        "target_kind": target_kind,
+        "best_alpha": best_alpha,
+        "val_r2": best_val_r2,
+        "train_r2_at_best_alpha": train_r2_at_best,
+        "val_mse": val_mse,
+        "baseline_mse_predict_train_mean": baseline_mse,
+        "val_mse_over_baseline": (
+            val_mse / baseline_mse if baseline_mse > 1e-12 else float("nan")
+        ),
+        "per_alpha": per_alpha,
+        "n_train": int(X_tr.size(0)),
+        "n_val": int(X_va.size(0)),
+        "latent_dim": int(X_tr.size(1)),
+    }
+    if target_kind == "future_return":
+        # Direction agreement is only meaningful when y is centered near 0.
+        # For volatility (strictly positive) it would degenerate to ~1.0.
+        out["sign_agreement"] = float(((val_pred > 0) == (y_va > 0)).float().mean())
+        out["positive_rate_val"] = float((y_va > 0).float().mean())
+    return out
+
+
+def _fit_direction(
+    train: dict[str, Tensor],
+    val: dict[str, Tensor],
+    alphas: Sequence[float],
+    max_iter: int,
+) -> dict:
+    """Logistic L2 alpha-sweep over collected (z, y_sign) pairs. Source-agnostic.
+
+    Returns the full result dict EXCEPT ``probe_source`` (caller-stamped). As with
+    ``_fit_regression`` the output depends only on the collected pairs and the
+    alpha grid.
+    """
+    X_tr, X_va = _standardize(train["z"], val["z"])
+    y_tr = train["y_sign"]
+    y_va = val["y_sign"]
+
+    per_alpha: list[dict] = []
+    best_val_acc = -float("inf")
+    best_alpha = float(alphas[0])
+
+    for alpha in alphas:
+        w, b = _logistic_lbfgs(X_tr, y_tr, alpha=alpha, max_iter=max_iter)
+        train_scores = X_tr @ w + b
+        val_scores = X_va @ w + b
+        train_acc = float(((train_scores > 0) == (y_tr > 0)).float().mean())
+        val_acc = float(((val_scores > 0) == (y_va > 0)).float().mean())
+        val_auc = _auroc(y_va, val_scores)
+        per_alpha.append(
+            {
+                "alpha": float(alpha),
+                "train_acc": train_acc,
+                "val_acc": val_acc,
+                "val_auroc": val_auc,
+            }
+        )
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_alpha = float(alpha)
+
+    best_row = next(r for r in per_alpha if r["alpha"] == best_alpha)
+    pos_rate = float((y_va == 1).float().mean())
+    majority_acc = max(pos_rate, 1.0 - pos_rate)
+
+    return {
+        "best_alpha": best_alpha,
+        "val_accuracy": best_val_acc,
+        "val_auroc": best_row["val_auroc"],
+        "train_accuracy_at_best_alpha": best_row["train_acc"],
+        "majority_class_accuracy": majority_acc,
+        "positive_class_rate_val": pos_rate,
+        "per_alpha": per_alpha,
+        "n_train": int(X_tr.size(0)),
+        "n_val": int(X_va.size(0)),
+        "latent_dim": int(X_tr.size(1)),
+    }
+
+
+# ==========================================================================
+# Public probes — components path (Stage 1)
 # ==========================================================================
 
 
@@ -316,7 +483,7 @@ def linear_probe_regression(
     device: Optional[str] = None,
     probe_source: ProbeSource = "z_price",
 ) -> dict:
-    """Ridge probe: z_price -> future_{return | volatility}.
+    """Ridge probe: z_price (or backbone pooled) -> future_{return | volatility}.
 
     Fits at each alpha in ``ridge_alphas`` and picks the one with best val R^2.
     The alpha sweep is logarithmic by default; the probe is contractually
@@ -354,59 +521,8 @@ def linear_probe_regression(
         components, cfg, "val", n_val_batches, dev, probe_source
     )
 
-    y_key = "y_return" if target_kind == "future_return" else "y_volatility"
-    X_tr, X_va = _standardize(train["z"], val["z"])
-    y_tr = train[y_key]
-    y_va = val[y_key]
-
-    per_alpha: list[dict] = []
-    best_val_r2 = -float("inf")
-    best_alpha = float(ridge_alphas[0])
-    best_w: Optional[Tensor] = None
-    best_intercept = 0.0
-
-    for alpha in ridge_alphas:
-        w, intercept = _ridge_closed_form(X_tr, y_tr, alpha)
-        train_pred = X_tr @ w + intercept
-        val_pred = X_va @ w + intercept
-        train_r2 = _r2(y_tr, train_pred)
-        val_r2 = _r2(y_va, val_pred)
-        per_alpha.append(
-            {"alpha": float(alpha), "train_r2": train_r2, "val_r2": val_r2}
-        )
-        if val_r2 > best_val_r2:
-            best_val_r2 = val_r2
-            best_alpha = float(alpha)
-            best_w = w
-            best_intercept = intercept
-
-    assert best_w is not None
-    val_pred = X_va @ best_w + best_intercept
-    val_mse = float(((y_va - val_pred) ** 2).mean())
-    baseline_mse = float(((y_va - y_tr.mean()) ** 2).mean())  # predict train-mean
-    train_r2_at_best = next(p["train_r2"] for p in per_alpha if p["alpha"] == best_alpha)
-
-    out: dict = {
-        "target_kind": target_kind,
-        "probe_source": probe_source,
-        "best_alpha": best_alpha,
-        "val_r2": best_val_r2,
-        "train_r2_at_best_alpha": train_r2_at_best,
-        "val_mse": val_mse,
-        "baseline_mse_predict_train_mean": baseline_mse,
-        "val_mse_over_baseline": (
-            val_mse / baseline_mse if baseline_mse > 1e-12 else float("nan")
-        ),
-        "per_alpha": per_alpha,
-        "n_train": int(X_tr.size(0)),
-        "n_val": int(X_va.size(0)),
-        "latent_dim": int(X_tr.size(1)),
-    }
-    if target_kind == "future_return":
-        # Direction agreement is only meaningful when y is centered near 0.
-        # For volatility (strictly positive) it would degenerate to ~1.0.
-        out["sign_agreement"] = float(((val_pred > 0) == (y_va > 0)).float().mean())
-        out["positive_rate_val"] = float((y_va > 0).float().mean())
+    out = _fit_regression(train, val, target_kind, ridge_alphas)
+    out["probe_source"] = probe_source
     return out
 
 
@@ -422,7 +538,7 @@ def linear_probe_direction(
     max_iter: int = 200,
     probe_source: ProbeSource = "z_price",
 ) -> dict:
-    """Logistic probe: z_price -> sign(future cumulative log-return).
+    """Logistic probe: z_price (or backbone pooled) -> sign(future cum log-return).
 
     Same alpha sweep pattern as the regression probe — best val accuracy
     picks the operating alpha. Reports:
@@ -450,47 +566,81 @@ def linear_probe_direction(
         components, cfg, "val", n_val_batches, dev, probe_source
     )
 
-    X_tr, X_va = _standardize(train["z"], val["z"])
-    y_tr = train["y_sign"]
-    y_va = val["y_sign"]
+    out = _fit_direction(train, val, alphas, max_iter)
+    out["probe_source"] = probe_source
+    return out
 
-    per_alpha: list[dict] = []
-    best_val_acc = -float("inf")
-    best_alpha = float(alphas[0])
 
-    for alpha in alphas:
-        w, b = _logistic_lbfgs(X_tr, y_tr, alpha=alpha, max_iter=max_iter)
-        train_scores = X_tr @ w + b
-        val_scores = X_va @ w + b
-        train_acc = float(((train_scores > 0) == (y_tr > 0)).float().mean())
-        val_acc = float(((val_scores > 0) == (y_va > 0)).float().mean())
-        val_auc = _auroc(y_va, val_scores)
-        per_alpha.append(
-            {
-                "alpha": float(alpha),
-                "train_acc": train_acc,
-                "val_acc": val_acc,
-                "val_auroc": val_auc,
-            }
+# ==========================================================================
+# Public probes — encode_fn path (arbitrary feature extractor; nb04 ceiling)
+# ==========================================================================
+
+
+def probe_regression_features(
+    encode_fn: EncodeFn,
+    cfg: JEPAConfig,
+    *,
+    target_kind: RegressionTarget = "future_return",
+    n_train_batches: int = 200,
+    n_val_batches: int = 50,
+    ridge_alphas: Sequence[float] = (0.01, 0.1, 1.0, 10.0, 100.0),
+    seed: int = 42,
+    device: Optional[str] = None,
+    source_label: str = "custom",
+) -> dict:
+    """Ridge probe over an ARBITRARY feature extractor ``encode_fn``.
+
+    Identical fitting path to ``linear_probe_regression`` (shares ``_fit_regression``
+    and the same collector core), but the representation comes from any callable
+    ``encode_fn(ctx_norm[B,L,F]) -> [B,D]`` instead of a JEPAComponents encoder.
+    Used by nb04 to score raw inputs, z_price, and frozen TimesFM through one
+    comparable harness. ``source_label`` is stamped into the returned dict under
+    ``probe_source`` so result tables can name the representation.
+
+    The numbers for an ``encode_fn`` that wraps ``components.price_encoder`` match
+    ``linear_probe_regression(..., probe_source="z_price")`` bit-for-bit at the
+    same seed — both collect via the same core and fit via the same helper.
+    """
+    if target_kind not in ("future_return", "future_volatility"):
+        raise ValueError(
+            f"target_kind must be future_return or future_volatility, got {target_kind!r}"
         )
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_alpha = float(alpha)
+    dev = resolve_device(device or "cpu")
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    best_row = next(r for r in per_alpha if r["alpha"] == best_alpha)
-    pos_rate = float((y_va == 1).float().mean())
-    majority_acc = max(pos_rate, 1.0 - pos_rate)
+    train = _collect_probe_pairs_fn(encode_fn, cfg, "train", n_train_batches, dev)
+    val = _collect_probe_pairs_fn(encode_fn, cfg, "val", n_val_batches, dev)
 
-    return {
-        "probe_source": probe_source,
-        "best_alpha": best_alpha,
-        "val_accuracy": best_val_acc,
-        "val_auroc": best_row["val_auroc"],
-        "train_accuracy_at_best_alpha": best_row["train_acc"],
-        "majority_class_accuracy": majority_acc,
-        "positive_class_rate_val": pos_rate,
-        "per_alpha": per_alpha,
-        "n_train": int(X_tr.size(0)),
-        "n_val": int(X_va.size(0)),
-        "latent_dim": int(X_tr.size(1)),
-    }
+    out = _fit_regression(train, val, target_kind, ridge_alphas)
+    out["probe_source"] = source_label
+    return out
+
+
+def probe_direction_features(
+    encode_fn: EncodeFn,
+    cfg: JEPAConfig,
+    *,
+    n_train_batches: int = 200,
+    n_val_batches: int = 50,
+    alphas: Sequence[float] = (0.01, 0.1, 1.0, 10.0, 100.0),
+    seed: int = 42,
+    device: Optional[str] = None,
+    max_iter: int = 200,
+    source_label: str = "custom",
+) -> dict:
+    """Logistic probe over an ARBITRARY feature extractor ``encode_fn``.
+
+    Encode_fn analogue of ``linear_probe_direction`` (shares ``_fit_direction``).
+    See ``probe_regression_features`` for the comparability guarantee.
+    """
+    dev = resolve_device(device or "cpu")
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    train = _collect_probe_pairs_fn(encode_fn, cfg, "train", n_train_batches, dev)
+    val = _collect_probe_pairs_fn(encode_fn, cfg, "val", n_val_batches, dev)
+
+    out = _fit_direction(train, val, alphas, max_iter)
+    out["probe_source"] = source_label
+    return out

@@ -20,6 +20,12 @@ from .diagnostics import (
 from .linear_probe import (
     linear_probe_regression,
     linear_probe_direction,
+    probe_regression_features,
+    probe_direction_features,
+)
+from .backbone_features import (
+    timesfm_encode_fn,
+    raw_feature_encode_fn,
 )
 
 __all__ = [
@@ -31,4 +37,8 @@ __all__ = [
     "regime_clustering",
     "linear_probe_regression",
     "linear_probe_direction",
+    "probe_regression_features",
+    "probe_direction_features",
+    "timesfm_encode_fn",
+    "raw_feature_encode_fn",
 ]
