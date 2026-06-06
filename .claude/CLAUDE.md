@@ -139,9 +139,12 @@ Evidence from training runs 1-4:
 
 **Frozen-backbone runs are best so far (val_jepa 0.064)**, but suspected degenerate until Stage 0 diagnostics clear it. The suspicion: a frozen random backbone + trained projection head + EMA target encoder with the same projection head converge to similar mappings for any input window (EMA collapse), giving artificially low val_jepa without genuine temporal prediction.
 
-**Next branch (determined by Stage 0):**
-- If Stage 0 says degenerate (shuffled ratio >= 0.8): investigate frozen PRETRAINED backbone (Moirai/TimesFM in a clean numpy<2 env) or reconstruction pretraining before JEPA. Do NOT continue with a random frozen backbone.
-- If Stage 0 says temporal (ratio < 0.8): run Stage 1 linear probe to quantify downstream value of z_price. The probe becomes the primary progress metric.
+**Stage 0 + Stage 1 are now DONE on nb03_best.pt (2026-06-05):** Stage 0 = degenerate (shuffled/true ratio 0.999); Stage 1 linear probe = no_signal AND anti-informative on val (trained z_price decodes future return/volatility/direction *worse* than an untrained random encoder — see the 2026-06-05 log). The frozen-random-backbone + trained-head + JEPA/VICReg loop is not merely empty, it is actively harmful on val.
+
+**Next branch is gated on the backbone (pre-head) probe (added, pending a Colab run):**
+- A pre-projection probe was added to nb03c (Test 4) and `linear_probe.py` (`probe_source="backbone"`). With `freeze_backbone=True` the `ProjectionHead` is the ONLY trained encoder module, so probing the pre-head `pooled` vs post-head `z_price` attributes the val degradation to head-vs-backbone.
+- If **pooled R² ≫ z_price R²** (trained head destroys signal the frozen backbone kept): the loop/head/loss must change (reconstruction pretraining, drop/redesign the head, or train against pre-head features). **A pretrained backbone alone will NOT fix this.**
+- If **pooled R² ≈ z_price R²** (both low): the head is fine; the frozen random backbone is simply a weak extractor → pivot to a frozen PRETRAINED backbone (TimesFM first — no numpy<2 dep; Moirai only in a clean numpy<2 env). Do NOT continue with a random frozen backbone.
 
 ---
 
@@ -151,7 +154,7 @@ Evidence from training runs 1-4:
 
 2. **Backbone quality:** The transformer backend is a from-scratch random initialization. No inductive bias from financial data. If Stage 0 says degenerate, the most likely fix is a pretrained backbone (Moirai or TimesFM), which requires a dedicated numpy<2 environment (not stock Colab). See 2026-06-04 log.
 
-3. **Stage 0 result TBD:** Run nb00_diagnostics.ipynb on nb03_best.pt. The shuffled_target_control verdict gates everything else.
+3. **Head vs. backbone (the open gate):** Stage 0 (degenerate) and Stage 1 (no_signal/anti-informative) are done on nb03_best.pt. The remaining question — is the trained head or the frozen random backbone responsible for the val anti-information? — is decided by the backbone (pre-head) probe added to nb03c Test 4. Run it on Colab; the result picks between "redesign the loop/head" and "pretrained backbone".
 
 ---
 
@@ -233,12 +236,22 @@ Use HTML files in `docs/` for any concept that benefits from a diagram. Referenc
 
 > **Maintained by the self-improvement protocol. Update this after each task.**
 
-- **Phase**: Diagnostics (Stage 0) -- evaluating existing checkpoint before any new training
+- **Phase**: Stage 1 complete on nb03_best.pt. Primary-metric verdict = no_signal / anti-informative (trained z_price decodes worse than untrained on val). A backbone (pre-head) probe is added and pending a Colab run to decide the pivot.
 - **Primary metric**: Downstream linear probe (Stage 1). val_jepa is secondary and must always be reported alongside its shuffled-target control ratio.
-- **Open decision**: Stage 0 shuffled-target control result on nb03_best.pt (TBD -- run nb00_diagnostics.ipynb)
-- **Decided**: Drop VICReg invariance term. Prefer Qwen2.5-1.5B + LoRA as predictor (Option B). Price encoder default = `transformer` backend. No new training run until Stage 0 clears the degeneracy question.
+- **Open decision**: head vs. backbone — run nb03c Test 4 (`probe_source="backbone"`) on Colab. pooled≫z_price → redesign loop/head; pooled≈z_price → pretrained backbone (TimesFM).
+- **Decided**: Drop VICReg invariance term. Prefer Qwen2.5-1.5B + LoRA as predictor (Option B). Price encoder default = `transformer` backend. No new training run until the backbone probe disambiguates head-vs-backbone.
 
 ### Log
+
+**2026-06-05 -- Stage 1 linear probe verdict = no_signal AND anti-informative; backbone (pre-head) probe added**
+- Ran nb03c on nb03_best.pt (frozen random `transformer` backbone, d_model=768/n_layers=8, freeze_backbone=True; the trained head is the only encoder param). Probe = ridge / logistic on frozen z_price, trained vs untrained-random-encoder, same arch. n_val=2835 → binomial SE = sqrt(0.25/2835) = 0.0094, so the direction signal threshold 2·SE = 0.0188.
+  - future_return    val R²: -0.069 (trained) vs -0.056 (untrained) → **Δval_r2_return = -0.013**
+  - future_volatility val R²: +0.058 (trained) vs +0.097 (untrained) → **Δval_r2_vol = -0.039** (the untrained RANDOM projection decodes volatility BETTER)
+  - direction        val acc: 0.528 vs 0.559 → **Δval_accuracy = -0.031** (|Δ| > 2·SE=0.0188); val AUROC 0.518 vs 0.569; trained acc 0.528 sits exactly on the majority-class baseline.
+  - Train R² is comparable across trained/untrained (vol 0.186 vs 0.217) — the degradation is **val-only**.
+- Conclusion: the frozen-random-backbone + trained-head + JEPA/VICReg loop is **anti-informative on val, not merely empty.** Training actively moves z_price away from downstream-decodable geometry on held-out data while train R² stays normal — a train/val generalization failure of the head, consistent with the Stage 0 degenerate (EMA-collapse) verdict.
+- Since freeze_backbone=True makes the `ProjectionHead` the ONLY trained encoder module, the head is the only thing that could cause this. Added a **backbone (pre-projection) probe** to disambiguate head-vs-backbone: `probe_source="backbone"` in `src/jepa_quant/eval/linear_probe.py` (forward pre-hook on `price_encoder.head` captures `pooled`; backend-agnostic — Moirai also does pooled→head), threaded through `_collect_probe_pairs`/`linear_probe_regression`/`linear_probe_direction` and recorded in each returned dict. nb03c gained "Test 4" printing the 4-way table {trained,untrained}×{backbone pooled, z_price} on future_volatility (+ direction) and `head_destruction = backbone_val_r2 − zprice_val_r2` per model.
+- **Pending a Colab run** (data + checkpoint live on Drive; not runnable here). Verified locally only: ast.parse of the module + every non-magic notebook cell, and a CPU smoke test that the pre-hook captures `pooled` [B, d_model] while the forward still returns z_price [B, latent_dim] and the two differ. Gate: pooled R²≫z_price R² → the trained head is the destroyer, a pretrained backbone alone won't help (change the loop/head/loss); pooled R²≈z_price R² → frozen random backbone is just weak, pivot to a pretrained backbone (TimesFM, no numpy<2 dep).
 
 **2026-06-05 -- Stage 0 diagnostics module + research workflow introduced**
 - Added `src/jepa_quant/eval/diagnostics.py` with five diagnostic functions: shuffled_target_control, compute_baselines, collapse_audit, level_dependence_test, regime_clustering.

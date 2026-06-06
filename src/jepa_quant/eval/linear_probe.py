@@ -57,6 +57,14 @@ CLOSE_IDX = 3
 
 RegressionTarget = Literal["future_return", "future_volatility"]
 
+# Which representation the probe is fit on:
+#   "z_price"  — the post-projection 256-d latent (the model's actual output)
+#   "backbone" — the PRE-projection pooled hidden state (input to encoder.head)
+# Under freeze_backbone=True the head is the only trained module in the encoder,
+# so comparing the two isolates whether the trained head destroys downstream
+# signal that the frozen backbone preserved (see Test 4 in nb03c).
+ProbeSource = Literal["z_price", "backbone"]
+
 
 # ==========================================================================
 # Data collection
@@ -89,50 +97,92 @@ def _collect_probe_pairs(
     split: str,
     n_batches: int,
     device: torch.device,
+    probe_source: ProbeSource = "z_price",
 ) -> dict[str, Tensor]:
     """Run encoder over ``split`` and return latents + every probe target.
 
     Returned tensors (all CPU float32 except ``y_sign`` which is long):
-        z            [N, D]  encoded latents (per-sample-normalized context)
+        z            [N, D]  representation (per-sample-normalized context).
+                             D = latent_dim for ``probe_source="z_price"``,
+                             D = backbone hidden dim for ``probe_source="backbone"``.
         y_return     [N]     sum of close log-returns over horizon
         y_sign       [N]     1 if y_return > 0 else 0
         y_volatility [N]     std of close log-returns over horizon
 
+    ``probe_source`` selects which representation populates ``z``:
+        "z_price"  — the encoder's returned post-projection latent.
+        "backbone" — the PRE-projection ``pooled`` hidden state, captured via a
+                     forward pre-hook on ``price_encoder.head``. We still run the
+                     full forward (so the hook fires) and discard the returned z.
+                     Backend-agnostic: both TransformerPriceEncoder and
+                     MoiraiPriceEncoder compute ``pooled`` then ``self.head(pooled)``,
+                     so the hook taps the same tensor in either. We deliberately do
+                     NOT call ``price_encoder.backbone(x)`` directly — it expects an
+                     already-projected ``[B, L+1, d_model]`` sequence, not raw
+                     ``[B, L, F]`` features.
+
     The encoder is moved to ``device`` and set to eval mode (idempotent —
     callers may pre-load weights).
     """
+    if probe_source not in ("z_price", "backbone"):
+        raise ValueError(
+            f"probe_source must be 'z_price' or 'backbone', got {probe_source!r}"
+        )
     components.price_encoder.to(device).eval()
     loader = _build_split_loader(cfg, split, normalize=False)
+
+    # For the backbone probe, tap the input to the projection head. The hook
+    # signature is hook(module, args); pooled = args[0]. We stash it per-batch
+    # and remove the handle in the finally block so repeated calls don't stack
+    # hooks on the shared encoder module.
+    captured: dict[str, Tensor] = {}
+    hook_handle = None
+    if probe_source == "backbone":
+        def _capture_pre_head(_module, args):  # noqa: ANN001 — torch hook signature
+            captured["pooled"] = args[0]
+
+        hook_handle = components.price_encoder.head.register_forward_pre_hook(
+            _capture_pre_head
+        )
 
     zs: list[Tensor] = []
     rets: list[Tensor] = []
     signs: list[Tensor] = []
     vols: list[Tensor] = []
 
-    with torch.no_grad():
-        for i, batch in enumerate(loader):
-            if i >= n_batches:
-                break
-            ctx_raw = batch["context"]  # [B, L, F] raw log-returns
-            tgt_raw = batch["target"]   # [B, H, F] raw log-returns
+    try:
+        with torch.no_grad():
+            for i, batch in enumerate(loader):
+                if i >= n_batches:
+                    break
+                ctx_raw = batch["context"]  # [B, L, F] raw log-returns
+                tgt_raw = batch["target"]   # [B, H, F] raw log-returns
 
-            tgt_close = tgt_raw[:, :, CLOSE_IDX]            # [B, H]
-            cum_ret = tgt_close.sum(dim=1)                  # [B] H-step log-return
-            sign = (cum_ret > 0).long()                     # [B] 0/1
-            vol = tgt_close.std(dim=1, unbiased=False)      # [B]
+                tgt_close = tgt_raw[:, :, CLOSE_IDX]            # [B, H]
+                cum_ret = tgt_close.sum(dim=1)                  # [B] H-step log-return
+                sign = (cum_ret > 0).long()                     # [B] 0/1
+                vol = tgt_close.std(dim=1, unbiased=False)      # [B]
 
-            # Re-normalize context exactly as PriceWindowDataset does when
-            # normalize=True, so the encoder sees its training distribution.
-            mu = ctx_raw.mean(dim=1, keepdim=True)          # [B, 1, F]
-            sigma = ctx_raw.std(dim=1, keepdim=True) + 1e-6 # [B, 1, F]
-            ctx_norm = (ctx_raw - mu) / sigma
+                # Re-normalize context exactly as PriceWindowDataset does when
+                # normalize=True, so the encoder sees its training distribution.
+                mu = ctx_raw.mean(dim=1, keepdim=True)          # [B, 1, F]
+                sigma = ctx_raw.std(dim=1, keepdim=True) + 1e-6 # [B, 1, F]
+                ctx_norm = (ctx_raw - mu) / sigma
 
-            z = components.price_encoder(ctx_norm.to(device)).cpu()  # [B, D]
+                # Always run the full forward so the pre-head hook fires. For
+                # probe_source="backbone" we use the captured pooled and discard
+                # the returned z; otherwise we use the returned z directly.
+                z_out = components.price_encoder(ctx_norm.to(device))
+                rep = captured["pooled"] if probe_source == "backbone" else z_out
+                z = rep.cpu()                                   # [B, D]
 
-            zs.append(z)
-            rets.append(cum_ret)
-            signs.append(sign)
-            vols.append(vol)
+                zs.append(z)
+                rets.append(cum_ret)
+                signs.append(sign)
+                vols.append(vol)
+    finally:
+        if hook_handle is not None:
+            hook_handle.remove()
 
     if not zs:
         raise ValueError(f"No batches collected for split={split!r}")
@@ -264,6 +314,7 @@ def linear_probe_regression(
     ridge_alphas: Sequence[float] = (0.01, 0.1, 1.0, 10.0, 100.0),
     seed: int = 42,
     device: Optional[str] = None,
+    probe_source: ProbeSource = "z_price",
 ) -> dict:
     """Ridge probe: z_price -> future_{return | volatility}.
 
@@ -296,8 +347,12 @@ def linear_probe_regression(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    train = _collect_probe_pairs(components, cfg, "train", n_train_batches, dev)
-    val = _collect_probe_pairs(components, cfg, "val", n_val_batches, dev)
+    train = _collect_probe_pairs(
+        components, cfg, "train", n_train_batches, dev, probe_source
+    )
+    val = _collect_probe_pairs(
+        components, cfg, "val", n_val_batches, dev, probe_source
+    )
 
     y_key = "y_return" if target_kind == "future_return" else "y_volatility"
     X_tr, X_va = _standardize(train["z"], val["z"])
@@ -333,6 +388,7 @@ def linear_probe_regression(
 
     out: dict = {
         "target_kind": target_kind,
+        "probe_source": probe_source,
         "best_alpha": best_alpha,
         "val_r2": best_val_r2,
         "train_r2_at_best_alpha": train_r2_at_best,
@@ -364,6 +420,7 @@ def linear_probe_direction(
     seed: int = 42,
     device: Optional[str] = None,
     max_iter: int = 200,
+    probe_source: ProbeSource = "z_price",
 ) -> dict:
     """Logistic probe: z_price -> sign(future cumulative log-return).
 
@@ -386,8 +443,12 @@ def linear_probe_direction(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    train = _collect_probe_pairs(components, cfg, "train", n_train_batches, dev)
-    val = _collect_probe_pairs(components, cfg, "val", n_val_batches, dev)
+    train = _collect_probe_pairs(
+        components, cfg, "train", n_train_batches, dev, probe_source
+    )
+    val = _collect_probe_pairs(
+        components, cfg, "val", n_val_batches, dev, probe_source
+    )
 
     X_tr, X_va = _standardize(train["z"], val["z"])
     y_tr = train["y_sign"]
@@ -421,6 +482,7 @@ def linear_probe_direction(
     majority_acc = max(pos_rate, 1.0 - pos_rate)
 
     return {
+        "probe_source": probe_source,
         "best_alpha": best_alpha,
         "val_accuracy": best_val_acc,
         "val_auroc": best_row["val_auroc"],
