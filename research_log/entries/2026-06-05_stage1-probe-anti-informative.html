@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="finding" content="Stage 1 linear probe on nb03_best.pt is anti-informative: trained z_price decodes future return, volatility, AND direction WORSE on val than an untrained random encoder (Δval_R² −0.013 / −0.039, Δacc −0.031, AUROC 0.518 vs 0.569). Backbone-probe follow-up confirms the trained projection head is the destroyer — it removes 0.023 of volatility R² its own backbone preserved while a random head removes none — and the frozen backbone is itself weak (~0.08), so a pretrained backbone is necessary but NOT sufficient while the JEPA/VICReg head loop is unchanged. Confirms Stage 0's degenerate verdict from the downstream side.">
+  <title>Stage 1 Linear Probe: nb03_best.pt is anti-informative | JEPA-Quant Log</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    /* delta pills — bad = trained worse than untrained (red), good = trained better (green) */
+    .delta { font-size: 0.75em; padding: 1px 6px; border-radius: 99px; margin-left: 4px; font-weight: 600; }
+    .delta.bad  { background: #fee2e2; color: #dc2626; }
+    .delta.good { background: #dcfce7; color: #16a34a; }
+    .delta.flat { background: #f1f5f9; color: #64748b; }
+    @media (prefers-color-scheme: dark) {
+      .delta.bad  { background: #7f1d1d; color: #fca5a5; }
+      .delta.good { background: #14532d; color: #86efac; }
+      .delta.flat { background: #1e293b; color: #94a3b8; }
+    }
+    /* table cell highlight: hi = better column, lo = worse column */
+    td.hi { background: #f0fdf4; font-weight: 600; }
+    td.lo { background: #fef2f2; }
+    @media (prefers-color-scheme: dark) {
+      td.hi { background: #14532d; }
+      td.lo { background: #7f1d1d; }
+    }
+    .callout.insight { background: #f5f3ff; border-left-color: #7c3aed; color: #4c1d95; }
+    @media (prefers-color-scheme: dark) { .callout.insight { background: #2e1065; color: #ddd6fe; } }
+    mark { background: #fef08a; color: inherit; border-radius: 2px; padding: 0 2px; }
+    @media (prefers-color-scheme: dark) { mark { background: #422006; } }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <a class="back-link" href="../index.html">&larr; Research Log</a>
+
+  <!-- ═══ HEADER ═══ -->
+  <header class="entry-header">
+    <h1>Stage 1 Linear Probe: nb03_best.pt is anti-informative</h1>
+    <div class="entry-meta">
+      <span><strong>Date</strong> 2026-06-05</span>
+      <span><strong>Component</strong> Evaluation / Price Encoder / VICReg</span>
+      <span><strong>Status</strong> <span class="badge badge-failed">Failed</span></span>
+      <span><strong>Time</strong> ~1 h (eval only, no training)</span>
+    </div>
+  </header>
+
+  <!-- ═══ SUMMARY ═══ -->
+  <section class="section">
+    <h2>Summary</h2>
+    <p>
+      Stage 0 diagnostics (nb00) had already returned <span class="badge badge-failed">degenerate</span>
+      on <code>nb03_best.pt</code> — the shuffled-target control gave a ratio of
+      <mark>0.999</mark> (true cosine 0.616 vs shuffled cosine 0.615), meaning the predictor is
+      cosine-similar to <em>every</em> target window, not the correct one. Stage 1 was supposed to
+      quantify whatever downstream value remained. Instead it escalated the diagnosis: the trained
+      encoder is not merely empty, it is <strong>anti-informative on validation</strong>.
+    </p>
+    <p>
+      Across all three probe targets, a frozen <em>untrained</em> random encoder of the identical
+      architecture decodes the future better than the trained checkpoint. The cleanest signal is
+      <strong>future volatility</strong> — the easiest target, since volatility clusters and is
+      autocorrelated: an untrained random projection hits val R² <code>+0.097</code>, while the
+      trained encoder manages only <code>+0.058</code>. <strong>Training removed ~40% of the
+      volatility signal a random projection carried for free.</strong> On direction, the trained
+      model sits exactly on the majority-class baseline (0.528) while untrained is 3 pp above chance
+      with AUROC 0.569. Because the backbone is frozen (<code>freeze_backbone=True</code>), the only
+      trained parameter in the encoder is the projection head — so the entire degradation is
+      attributable to the head, and the val-only nature of the gap (train R² is comparable) points
+      at the JEPA+VICReg objective pushing the head toward a cosine-tidy but downstream-useless
+      manifold.
+    </p>
+  </section>
+
+  <!-- ═══ HYPOTHESIS ═══ -->
+  <section class="section">
+    <h2>Hypothesis / Motivation</h2>
+    <p>
+      Per CLAUDE.md metric discipline, the downstream linear probe — not val_jepa — is the primary
+      progress metric. val_jepa can be low via EMA collapse (context and EMA-target projection heads
+      converging to similar mappings regardless of input window), so a low val_jepa must be cleared
+      by the shuffled-target control before it counts as progress. Stage 0 had <em>not</em> cleared
+      it. The motivating question for Stage 1:
+    </p>
+    <div class="math" style="background:var(--surface); border-left:3px solid var(--accent); padding:0.85rem 1.1rem; margin:1rem 0; font-family:var(--font-mono); font-size:0.88em; line-height:1.7;">
+      How much task signal does <code>z_price</code> from nb03_best.pt carry,<br>
+      relative to an untrained random encoder of the same architecture?
+    </div>
+    <p>
+      <strong>H1:</strong> trained z_price linearly decodes future return / volatility / direction
+      better than untrained by more than sampling noise → the encoder learned something useful.
+      <strong>H0:</strong> trained ≈ untrained within noise on all three → training added no
+      decodable signal. Given the Stage 0 verdict, we <em>expected</em> H0 (trained ≈ untrained).
+      We did not expect trained to come in measurably <em>below</em> untrained.
+    </p>
+  </section>
+
+  <!-- ═══ SETUP ═══ -->
+  <section class="section">
+    <h2>Experimental Setup</h2>
+
+    <h3>Checkpoint &amp; encoder</h3>
+    <pre><code>checkpoint    : nb03_best.pt   (best val_jepa from nb03, 10k-step run)
+price_encoder : transformer (FROM-SCRATCH random init)  d_model 768  n_heads 12  n_layers 8
+freeze_backbone : true    ← ONLY the projection head (Linear→GELU→Linear→LayerNorm, 768→256) was trained
+latent_dim    : 256
+data          : per-ticker chronological split, val = last 15%  (normalized log-returns)
+horizon H     : 16   context L : 64</code></pre>
+
+    <h3>Probe definitions (all on FROZEN z_price, fit fresh per target)</h3>
+    <ul>
+      <li><strong>future_return</strong> — ridge to the sum of close log-returns over the H=16 target window. α swept over {0.01, 0.1, 1, 10, 100}, best val R² selected.</li>
+      <li><strong>future_volatility</strong> — ridge to the std of close log-returns over the H=16 window. The easiest target (volatility clusters).</li>
+      <li><strong>direction</strong> — L-BFGS logistic to sign(future cumulative log-return). Reports accuracy + AUROC.</li>
+    </ul>
+    <p style="font-size:0.9em; color:var(--text-muted);">
+      Probe targets are derived from <strong>raw, unnormalized</strong> target windows (so target
+      scale is comparable across samples); the encoder still receives per-sample-normalized context,
+      re-normalized inside the collector to match PriceWindowDataset's <code>normalize=True</code>
+      path exactly. Each probe is run twice — once on the trained checkpoint, once on a fresh
+      <code>build_components(cfg)</code> (untrained random init, same arch) — the untrained run is the
+      baseline the trained model must beat. Pure-torch probes (closed-form ridge in float64,
+      L-BFGS for logistic); no sklearn.
+    </p>
+
+    <h3>Sampling</h3>
+    <pre><code>n_train_batches : 100   →  n_train = 16,065 samples
+n_val_batches   : 50    →  n_val   =  2,835 samples
+seed            : 42
+binomial SE on direction acc = sqrt(0.25 / 2835) = 0.0094  →  signal threshold 2·SE = 0.0188</code></pre>
+  </section>
+
+  <!-- ═══ RESULTS ═══ -->
+  <section class="section">
+    <h2>Results</h2>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-name">Δ val R² (return)</div>
+        <div class="metric-value">−0.013</div>
+        <div class="metric-note">trained − untrained (negative = worse)</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">Δ val R² (volatility)</div>
+        <div class="metric-value">−0.039</div>
+        <div class="metric-note">trained 0.058 vs untrained 0.097</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">Δ val accuracy (dir.)</div>
+        <div class="metric-value">−0.031</div>
+        <div class="metric-note">threshold for signal = +0.019</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">val AUROC (dir.)</div>
+        <div class="metric-value">0.518</div>
+        <div class="metric-note">untrained 0.569 — trained ≈ chance</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">dir. acc vs majority</div>
+        <div class="metric-value">0.528</div>
+        <div class="metric-note">= majority baseline 0.528 (at chance)</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">overall verdict</div>
+        <div class="metric-value">no_signal</div>
+        <div class="metric-note">all 3 deltas fail</div>
+      </div>
+    </div>
+
+    <h3>Trained vs untrained — all three targets</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Target</th><th>metric</th>
+            <th>trained</th><th>untrained</th><th>Δ (tr − ut)</th><th>verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td rowspan="2"><strong>future_return</strong><br><small>ridge → Σ close log-ret</small></td>
+            <td>val R²</td>
+            <td class="lo">−0.0692</td><td class="hi">−0.0557</td>
+            <td><span class="delta bad">−0.0135</span></td>
+            <td>FAIL (need &gt; +0.01)</td>
+          </tr>
+          <tr>
+            <td>train R² / sign agree</td>
+            <td>+0.1231 / 0.519</td><td>+0.1202 / 0.545</td>
+            <td><span class="delta flat">train ≈</span></td>
+            <td>val-only gap</td>
+          </tr>
+          <tr>
+            <td rowspan="2"><strong>future_volatility</strong><br><small>ridge → std close log-ret</small></td>
+            <td>val R²</td>
+            <td class="lo">+0.0581</td><td class="hi">+0.0970</td>
+            <td><span class="delta bad">−0.0388</span></td>
+            <td>FAIL (need &gt; +0.01)</td>
+          </tr>
+          <tr>
+            <td>train R²</td>
+            <td>+0.1864</td><td>+0.2165</td>
+            <td><span class="delta flat">train ≈</span></td>
+            <td>val-only gap</td>
+          </tr>
+          <tr>
+            <td rowspan="2"><strong>direction</strong><br><small>logistic → sign(ret)</small></td>
+            <td>val accuracy</td>
+            <td class="lo">0.5277</td><td class="hi">0.5591</td>
+            <td><span class="delta bad">−0.0314</span></td>
+            <td>FAIL (need &gt; +0.019)</td>
+          </tr>
+          <tr>
+            <td>val AUROC</td>
+            <td class="lo">0.5184</td><td class="hi">0.5691</td>
+            <td><span class="delta bad">−0.0507</span></td>
+            <td>trained ≈ chance (0.50)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:0.5rem; font-size:0.88em; color:var(--text-muted);">
+      Green = better column, red = worse. The untrained random encoder wins <em>every</em> val row.
+      Train R² is comparable across trained/untrained on both regression targets (0.123 vs 0.120;
+      0.186 vs 0.217) — the entire degradation is on validation. On direction, the trained model's
+      0.528 accuracy is identical to the majority-class baseline (positive-class rate 0.528): the
+      probe is reading the class prior, not the representation.
+    </p>
+
+    <h3>Stage 0 context (same checkpoint)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>diagnostic</th><th>value</th><th>reading</th></tr></thead>
+        <tbody>
+          <tr><td>shuffled ratio (shuf/true cos)</td><td class="lo">0.999</td><td>degenerate — predictor input-independent</td></tr>
+          <tr><td>trained val_jepa</td><td>0.384</td><td>vs untrained 0.912 — "looks" trained…</td></tr>
+          <tr><td>effective rank of z_price</td><td>13.5 / 256</td><td>severe rank collapse (not point collapse)</td></tr>
+          <tr><td>top-10 eigenvalue share</td><td>0.70</td><td>variance concentrated in ~13 dims</td></tr>
+          <tr><td>level-dependence mean R²</td><td>−0.71</td><td>good — z_price does NOT encode raw price level</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Raw output</h3>
+    <pre><code>=== Regression: future_return ===          trained   untrained   delta
+  val R^2                                    -0.0692   -0.0557    -0.0135   FAIL
+  train R^2 (best a)                         +0.1231   +0.1202
+  val MSE / baseline                          1.0535    1.0402
+  sign agreement                              0.5192    0.5450
+  best alpha                                  100.0     100.0
+  n_train / n_val                             16065 / 2835
+
+=== Regression: future_volatility ===      trained   untrained   delta
+  val R^2                                    +0.0581   +0.0970    -0.0388   FAIL
+  train R^2 (best a)                         +0.1864   +0.2165
+  val MSE / baseline                          0.9201    0.8822
+  best alpha                                  100.0     10.0
+
+=== Direction: sign(future_return) ===     trained   untrained   delta
+  val accuracy                                0.5277    0.5591    -0.0314   FAIL
+  val AUROC                                   0.5184    0.5691    -0.0507
+  train acc (best a)                          0.6515    0.6361
+  majority baseline                           0.5280   (positive rate 0.5280)
+  best alpha                                  1.0       100.0
+  n_val / binom_se                            2835 / 0.0094   (threshold 2*se = 0.0188)
+  EXTRA FAIL: trained does not beat majority-class baseline. Probe at chance.
+
+overall_verdict : no_signal</code></pre>
+  </section>
+
+  <!-- ═══ ANALYSIS ═══ -->
+  <section class="section">
+    <h2>Analysis &amp; Findings</h2>
+
+    <h3>The volatility number is the smoking gun</h3>
+    <p>
+      Volatility is the easiest of the three targets: it clusters in time and is strongly
+      autocorrelated, so even a fixed random projection of normalized log-returns linearly decodes
+      it (untrained val R² <code>+0.097</code>). If training were merely <em>neutral</em> — adding no
+      signal — we'd expect trained ≈ untrained here. Instead the trained encoder lands at
+      <code>+0.058</code>, having <strong>destroyed ~40% of the signal a random projection carried
+      for free</strong>. A target this forgiving regressing is the strongest possible statement that
+      the representation got worse, not just flat.
+    </p>
+
+    <h3>Why this is attributable to the projection head specifically</h3>
+    <p>
+      The checkpoint was trained with <code>freeze_backbone=True</code>. In
+      <code>TransformerPriceEncoder</code> the forward is
+      <code>input_proj → +CLS → +pos → backbone → pooled = h[:,0] → head(pooled) → z_price</code>,
+      and <code>input_proj</code>, the CLS token, and the transformer stack are <em>all frozen</em>.
+      The <strong>only</strong> parameter that moved during nb03 is <code>head</code> (the
+      ProjectionHead). Therefore the difference between trained-z_price and untrained-z_price is
+      entirely the difference between a trained head and a random head on top of the
+      <em>same frozen random features</em>. The val-only degradation (train R² is comparable)
+      means the head learned a mapping that fits train statistics under the JEPA+VICReg objective but
+      does not transport — consistent with the head being pulled toward the EMA-collapse manifold the
+      shuffled control already flagged.
+    </p>
+
+    <div class="callout danger">
+      <strong>What failed:</strong> the frozen-random-backbone + trained-head + JEPA/VICReg
+      configuration is anti-informative. The trained projection head actively discards downstream
+      signal that survives a random projection. val_jepa = 0.384 is a mirage produced by EMA
+      collapse, exactly as CLAUDE.md warned.
+    </div>
+
+    <div class="callout insight">
+      <strong>The insight:</strong> a low val_jepa with a flat-or-negative probe is the textbook
+      EMA-collapse signature. The intrinsic metric (cosine to a moving EMA target) can be driven down
+      by making the two projection heads agree on <em>any</em> input — which is precisely a head that
+      throws away input-specific structure. The probe and the shuffled control are measuring the same
+      failure from two directions, and they agree.
+    </div>
+
+    <div class="callout insight">
+      <strong>Resolved by the follow-up below.</strong> The original open question — is the frozen
+      backbone carrying signal the head destroys, or is the backbone also empty? — is answered by the
+      pre-head (backbone <code>pooled</code>) probe: <em>both</em>. The trained head removes ~0.023 of
+      the volatility R² its own backbone preserved (a random head removes none), AND the frozen
+      backbone is itself weak (~0.08). See "Follow-up: backbone probe" below.
+    </div>
+  </section>
+
+  <!-- ═══ FOLLOW-UP: BACKBONE PROBE ═══ -->
+  <section class="section">
+    <h2>Follow-up: backbone (pre-head) probe — head-vs-backbone resolved</h2>
+    <p>
+      nb03c Test 4 re-runs the volatility probe on the <strong>pre-projection</strong> representation —
+      the pooled CLS hidden state fed into <code>price_encoder.head</code>, captured via a forward
+      pre-hook (<code>probe_source="backbone"</code>) — for both models. Comparing pre-head vs post-head
+      <em>within</em> each model isolates the head's effect, and because each delta uses that model's
+      own backbone as its reference, it is robust to the two frozen backbones being different random
+      draws.
+    </p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>representation</th><th>trained val R²</th><th>untrained val R²</th><th>dim</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>backbone pooled (pre-head)</td><td>+0.0816</td><td>+0.0969</td><td>768</td></tr>
+          <tr><td>z_price (post-head)</td><td class="lo">+0.0581</td><td class="hi">+0.0970</td><td>256</td></tr>
+          <tr><td><strong>head destruction</strong> (pre − post)</td><td class="lo">+0.0234</td><td>−0.0001</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout danger">
+      <strong>The trained head is the destroyer.</strong> It removes 0.023 of volatility R² its own
+      backbone preserved; a random head removes essentially none (−0.0001). The destruction is a
+      property of what JEPA+VICReg+EMA trained the head to do — collapse toward an input-independent,
+      cosine-tidy <code>z_price</code> — not of the backbone's features.
+    </div>
+
+    <div class="callout warning">
+      <strong>But the backbone is weak too — a pretrained one is necessary, not sufficient.</strong>
+      The frozen random backbone carries only ~0.08 volatility R² (a random projection of raw features,
+      no financial inductive bias). Two problems, not one: (1) a weak backbone, fixed by a pretrained
+      model (TimesFM); (2) a collapsing head/loss, which a pretrained backbone does <em>not</em> fix —
+      feed richer features into the same loop and the head will still scramble them on val. Both must
+      be addressed.
+    </div>
+
+    <p style="font-size:0.88em; color:var(--text-muted);">
+      Caveats: single target (volatility — the most decodable), single seed, no confidence intervals.
+      The cross-model backbone gap (0.0816 vs 0.0969) is two different frozen random inits — within
+      init-lottery noise, not a training effect (the backbone never receives gradients). The
+      load-bearing numbers are the <em>within</em>-model head-destruction deltas (+0.023 trained vs
+      ~0 untrained), which that noise does not touch. Running the return and direction backbone probes
+      would harden the conclusion, but the volatility result is already directionally decisive and
+      consistent with Stage 0 / Stage 1.
+    </p>
+  </section>
+
+  <!-- ═══ THOUGHT PROCESS ═══ -->
+  <section class="section">
+    <h2>Thought Process &amp; Debugging Notes</h2>
+    <p>
+      First instinct on seeing the deltas was to suspect the probe harness — a negative R² is alarming
+      until you remember it's an honest out-of-sample R² (baseline = predict the val mean), so negative
+      simply means "worse than predicting the mean", which is a real and possible outcome for a
+      degenerate representation. The untrained baseline being run through the identical harness is the
+      control that rules out a probe bug: if the harness were broken, untrained would look broken too,
+      and it doesn't — untrained produces sensible, mildly-positive numbers.
+    </p>
+    <p>
+      The temptation was to immediately reach for the CLAUDE.md "tune lambda_c upward to fix collapse"
+      lever. But that lever only touches <code>z_price</code> marginal statistics (per-dim variance,
+      off-diagonal decorrelation); it cannot fix a representation that has thrown away input geometry,
+      and it would burn Colab units producing a prettier effective-rank number on a still-useless
+      embedding. The probe being anti-informative is a stronger stop signal than any intrinsic metric:
+      no hyperparameter on this architecture is worth sweeping until the encoder beats a random
+      projection on at least one downstream target.
+    </p>
+    <p>
+      The one framing correction worth recording: the decisive follow-up is <em>not</em> "trained
+      backbone vs untrained backbone" (the frozen backbone is the same random extractor in both, so
+      that delta is ~0 by construction). It is "pre-head <code>pooled</code> vs post-head
+      <code>z_price</code>, within each model" — that isolates whether the head is the destroyer.
+    </p>
+  </section>
+
+  <!-- ═══ LESSONS ═══ -->
+  <section class="section">
+    <h2>Lessons Learned</h2>
+    <ul>
+      <li>
+        <strong>Always run the untrained-encoder probe in the same harness.</strong> It is both the
+        decision baseline and the harness sanity check. Sensible untrained numbers + bad trained
+        numbers = the model is the problem, not the probe.
+      </li>
+      <li>
+        <strong>Anti-informative beats "no signal" as a stop condition.</strong> A trained model that
+        scores <em>below</em> a random projection on the easiest target (volatility) is not a tuning
+        problem — it is an architecture/objective problem. Do not sweep hyperparameters past this point.
+      </li>
+      <li>
+        <strong>With a frozen backbone, the probe gap localizes to the head automatically.</strong>
+        Knowing which parameters were trainable turns an ambiguous "the model is bad" into a precise
+        "the projection head is destroying signal", which directly changes what to fix.
+      </li>
+      <li>
+        <strong>val-only degradation with comparable train R² is the EMA-collapse fingerprint.</strong>
+        It is the downstream-side echo of the shuffled-target control failing — two independent
+        diagnostics pointing at the same root cause is as strong as a verdict gets here.
+      </li>
+    </ul>
+  </section>
+
+  <!-- ═══ NEXT STEPS ═══ -->
+  <section class="section">
+    <h2>Next Steps</h2>
+    <ol>
+      <li>
+        <strong>Backbone probe — DONE (see follow-up above).</strong> The trained head destroys signal
+        a random head does not (+0.023 vs ~0 vol R²), and the frozen backbone is itself weak (~0.08).
+        Conclusion: a pretrained backbone is <em>necessary but not sufficient</em> — both the backbone
+        and the head/loss must change.
+      </li>
+      <li>
+        <strong>Establish the backbone ceiling cheaply — no JEPA.</strong> Before any training, probe
+        RAW pretrained-backbone features (TimesFM pooled, no projection head, no JEPA) on vol / return /
+        direction. Forward-passes only (~no Colab budget). De-risks the pivot: confirm vol R² lands well
+        above the ~0.08 random-backbone floor before committing. TimesFM first — no numpy&lt;2
+        dependency; Moirai only in a dedicated numpy&lt;2 env.
+      </li>
+      <li>
+        <strong>Then fix the loop, not just the backbone.</strong> Head destruction is independent of
+        backbone quality, so the JEPA/VICReg+EMA formulation needs a change that gives the head a reason
+        to preserve input structure: reconstruction pretraining before JEPA, the soft-codebook
+        bottleneck (CLAUDE.md open decision) in place of VICReg, or dropping the trained projection on
+        the target side. Pick one and probe it against this entry's floor (untrained random ≈ +0.097
+        vol R², ≈ 0.559 direction acc).
+      </li>
+      <li>
+        <strong>No new training run on this architecture</strong> until the backbone probe clears the
+        head-vs-backbone question. Per CLAUDE.md, a change that cannot beat the shuffled control / probe
+        baseline is not a forward step.
+      </li>
+      <li>
+        <strong>Record the result as the Stage 1 floor.</strong> Whatever a pretrained backbone scores
+        later is compared against these numbers (untrained random ≈ +0.097 vol R², ≈ 0.559 direction
+        acc) — not against val_jepa.
+      </li>
+    </ol>
+  </section>
+
+  <footer class="site-footer">
+    JEPA-Quant &mdash; <a href="../index.html">Research Log</a> &mdash;
+    <a href="https://github.com/shreyasnat2804/JEPA-quant">GitHub</a>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="finding" content="No-JEPA ceiling probe (nb04) REFUTES the TimesFM pivot: RAW TimesFM-2.0-500m pooled features (close channel) decode future volatility at val R² −0.134 — BELOW the untrained random-projection floor (+0.097) and far below a trivial 4-moment baseline (+0.333), with severe overfit (train +0.246) and α pinned at the grid max. The decisive surprise is the floor itself: hand-crafted per-channel [mean,std,last,sum] features beat every learned/pretrained representation on volatility, so the volatility signal is real and trivially linear, and the per-sample context normalization appears to strip the scale/vol-level feature the encoders need. Return is ~unpredictable (all ≤ +0.012); direction has weak signal only the random projection (0.571) captures. Decision: HOLD — do not spend training units on a frozen-TimesFM swap; re-bar the project against +0.33 vol R², not the +0.097 floor.">
+  <title>nb04 Ceiling Probe: TimesFM refuted, raw moments win | JEPA-Quant Log</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <style>
+    .delta { font-size: 0.75em; padding: 1px 6px; border-radius: 99px; margin-left: 4px; font-weight: 600; }
+    .delta.bad  { background: #fee2e2; color: #dc2626; }
+    .delta.good { background: #dcfce7; color: #16a34a; }
+    .delta.flat { background: #f1f5f9; color: #64748b; }
+    @media (prefers-color-scheme: dark) {
+      .delta.bad  { background: #7f1d1d; color: #fca5a5; }
+      .delta.good { background: #14532d; color: #86efac; }
+      .delta.flat { background: #1e293b; color: #94a3b8; }
+    }
+    td.hi { background: #f0fdf4; font-weight: 600; }
+    td.lo { background: #fef2f2; }
+    @media (prefers-color-scheme: dark) {
+      td.hi { background: #14532d; }
+      td.lo { background: #7f1d1d; }
+    }
+    .callout.insight { background: #f5f3ff; border-left-color: #7c3aed; color: #4c1d95; }
+    @media (prefers-color-scheme: dark) { .callout.insight { background: #2e1065; color: #ddd6fe; } }
+    mark { background: #fef08a; color: inherit; border-radius: 2px; padding: 0 2px; }
+    @media (prefers-color-scheme: dark) { mark { background: #422006; } }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <a class="back-link" href="../index.html">&larr; Research Log</a>
+
+  <!-- ═══ HEADER ═══ -->
+  <header class="entry-header">
+    <h1>nb04 Ceiling Probe: TimesFM refuted, raw moments win</h1>
+    <div class="entry-meta">
+      <span><strong>Date</strong> 2026-06-06</span>
+      <span><strong>Component</strong> Evaluation / Pretrained Backbone (TimesFM) / Input Pipeline</span>
+      <span><strong>Status</strong> <span class="badge badge-failed">Failed</span></span>
+      <span><strong>Time</strong> ~30 min (forward passes only, no training)</span>
+    </div>
+  </header>
+
+  <!-- ═══ SUMMARY ═══ -->
+  <section class="section">
+    <h2>Summary</h2>
+    <p>
+      The Stage 1 follow-up (2026-06-05) left two faults on the table: the trained projection head
+      destroys downstream signal, AND the frozen random backbone is itself weak (~0.08 vol R²). The
+      proposed fix was a pretrained backbone (TimesFM). Before spending any training units, nb04 runs
+      the cheap, decisive test: probe <strong>RAW TimesFM pooled features — no JEPA, no projection
+      head, no training</strong> — against the same linear-probe harness, alongside the untrained
+      random floor, the trained checkpoint, and a hand-crafted raw-input baseline. This is the
+      <em>ceiling</em> any frozen-backbone JEPA inherits.
+    </p>
+    <p>
+      The pivot is <span class="badge badge-failed">refuted</span>. On future volatility (the most
+      decodable target), RAW TimesFM lands at val R² <mark>−0.134</mark> — <strong>below</strong> the
+      untrained random-projection floor (<code>+0.097</code>) and far below a trivial 4-moment baseline
+      (<code>+0.333</code>) — while overfitting hard (train <code>+0.246</code>) with α pinned at the
+      grid maximum. A frozen-TimesFM JEPA loop is not justified by this evidence.
+    </p>
+    <div class="callout success">
+      <strong>The real headline is the floor, not the ceiling.</strong> A 24-dimensional
+      <code>[mean, std, last, sum]</code>-per-channel baseline decodes future volatility at
+      <strong>+0.333 val R²</strong>, beating trained <code>z_price</code> (+0.118), the random
+      projection (+0.097), and TimesFM (−0.134) by a wide margin. The volatility signal is real,
+      strong, and <em>trivially linear</em> — no foundation model, no JEPA, needed. The project's bar
+      must move to +0.33, not the +0.097 floor.
+    </div>
+  </section>
+
+  <!-- ═══ HYPOTHESIS ═══ -->
+  <section class="section">
+    <h2>Hypothesis / Motivation</h2>
+    <p>
+      JEPA cannot manufacture downstream signal that is absent from the backbone's representation. With
+      a frozen backbone its only encoder lever is the projection head, which the prior entry showed
+      collapses. So the RAW-feature probe is the ceiling JEPA inherits — measuring it cleanly separates
+      failure modes before any training units are spent.
+    </p>
+    <div class="math" style="background:var(--surface); border-left:3px solid var(--accent); padding:0.85rem 1.1rem; margin:1rem 0; font-family:var(--font-mono); font-size:0.88em; line-height:1.7;">
+      Do RAW pretrained TimesFM features linearly decode our targets on val,<br>
+      better than the random-projection floor and a raw-input baseline,<br>
+      with NO JEPA / NO head / NO training?
+    </div>
+    <p>
+      <strong>H1:</strong> RAW TimesFM vol R² beats both the floor (by &gt;0.03) and raw inputs (by
+      &gt;0.02) → signal exists that the project's loop destroys; a backbone swap is worth training.
+      <strong>H0:</strong> TimesFM ≈ floor → a pretrained backbone alone is not the bottleneck.
+      <strong>Falsifier:</strong> TimesFM vol R² within ~0.01 of (or below) the floor.
+    </p>
+  </section>
+
+  <!-- ═══ SETUP ═══ -->
+  <section class="section">
+    <h2>Experimental Setup</h2>
+    <h3>Four feature extractors — one identical harness</h3>
+    <pre><code>raw_input         : per-channel [mean, std, last, sum] of the normalized context  → D=24   (no encoder)
+untrained_zprice  : random-init head + frozen random backbone (the Stage 1 FLOOR) → D=256
+trained_zprice    : nb03_best post-head latent                                    → D=256
+timesfm           : RAW TimesFM-2.0-500m pooled last_hidden_state, mean over patches, close channel → D=1280  (CEILING)</code></pre>
+    <p style="font-size:0.9em; color:var(--text-muted);">
+      Every representation goes through the same <code>probe_*_features(encode_fn, …)</code> path
+      (same cfg, n_train=100 batches, n_val=50, seed=42, WIDE α grid 0.01…1e4). The floor and trained
+      baselines are <strong>re-run in-session under the wide grid</strong>, not cited from Stage 1
+      (which pinned α=100, its grid max). TimesFM loads via the HuggingFace <code>transformers</code>
+      integration (<code>TimesFmModelForPrediction</code>, <em>not</em> the <code>timesfm</code> pip
+      package — stays on Colab's numpy-2 stack); embeddings = <code>last_hidden_state</code> mean-pooled
+      over patches, never the forecast head. Context L=64 = exactly 2 patches (patch_len 32).
+    </p>
+    <p style="font-size:0.9em; color:var(--text-muted);">
+      <strong>Targets</strong> (from RAW target windows, H=16): future_return = Σ close log-ret;
+      future_volatility = std close log-ret; direction = sign(Σ). All encoders receive the SAME
+      per-sample-normalized context (re-normalized in the collector to match
+      <code>PriceWindowDataset(normalize=True)</code>).
+    </p>
+  </section>
+
+  <!-- ═══ RESULTS ═══ -->
+  <section class="section">
+    <h2>Results</h2>
+
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-name">vol R² — raw-input</div>
+        <div class="metric-value">+0.333</div>
+        <div class="metric-note">trivial baseline WINS</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">vol R² — TimesFM (ceiling)</div>
+        <div class="metric-value">−0.134</div>
+        <div class="metric-note">below the +0.097 floor</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">C − Fl (vol)</div>
+        <div class="metric-value">−0.231</div>
+        <div class="metric-note">need &gt; +0.03 to commit → FAIL</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">TimesFM vol overfit</div>
+        <div class="metric-value">0.246 → −0.134</div>
+        <div class="metric-note">train → val (α pinned at 1e4)</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">best direction acc</div>
+        <div class="metric-value">0.571</div>
+        <div class="metric-note">untrained random; majority 0.528</div>
+      </div>
+      <div class="metric">
+        <div class="metric-name">verdict</div>
+        <div class="metric-value">HOLD</div>
+        <div class="metric-note">do not pivot to frozen TimesFM</div>
+      </div>
+    </div>
+
+    <h3>4×3 ceiling-vs-floor table (val metrics)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>representation</th>
+            <th>future_return R²</th>
+            <th>future_volatility R²</th>
+            <th>direction acc</th>
+            <th>direction AUROC</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>raw-input</strong> <small>(24-d moments)</small></td>
+            <td class="hi">+0.012</td><td class="hi">+0.333</td>
+            <td>0.528</td><td>0.552</td>
+          </tr>
+          <tr>
+            <td>untrained z_price <small>(FLOOR)</small></td>
+            <td>−0.041</td><td>+0.097</td>
+            <td class="hi">0.571</td><td class="hi">0.569</td>
+          </tr>
+          <tr>
+            <td>trained z_price <small>(nb03_best)</small></td>
+            <td>−0.058</td><td>+0.118</td>
+            <td>0.535</td><td>0.542</td>
+          </tr>
+          <tr>
+            <td><strong>TimesFM raw</strong> <small>(CEILING)</small></td>
+            <td class="lo">−0.081</td><td class="lo">−0.134</td>
+            <td>0.539</td><td>0.552</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:0.5rem; font-size:0.88em; color:var(--text-muted);">
+      Green = best in column, red = TimesFM (the supposed ceiling) coming in last on both regression
+      targets. Majority-class baseline for direction = 0.528; binomial 2·SE = 0.019, so only the
+      untrained random projection (0.571, +0.043 over majority) clears the signal threshold —
+      trained (0.535) and TimesFM (0.539) sit on chance.
+    </p>
+
+    <h3>Overfit &amp; regularization-boundary diagnostics</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>representation / target</th><th>train R²</th><th>val R²</th><th>best α</th><th>reading</th></tr></thead>
+        <tbody>
+          <tr><td>raw-input / vol</td><td>+0.242</td><td class="hi">+0.333</td><td>1000</td><td>robust — val ≥ train, α mid-grid</td></tr>
+          <tr><td>trained_zprice / vol</td><td>+0.121</td><td>+0.118</td><td>10000*</td><td>α pinned at grid max</td></tr>
+          <tr><td>TimesFM / vol</td><td>+0.246</td><td class="lo">−0.134</td><td>10000*</td><td>severe overfit; α pinned at max</td></tr>
+          <tr><td>TimesFM / direction</td><td>—</td><td>0.539</td><td>0.01*</td><td>α pinned at grid MIN (opposite end)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:0.88em; color:var(--text-muted);">
+      * boundary-pinned. TimesFM's D=1280 wants more regularization on regression (overfit, α→max)
+      and less on direction (α→min) — the wide grid is still too narrow for it at both ends. But
+      widening cannot rescue a vol R² that is already <em>maximally</em> regularized in-grid and still
+      −0.134: the overfit is structural (1280 dims, ~25k samples, a 2-patch mean-pool). raw-input is
+      NOT pinned on volatility (α=1000), so its +0.333 is a genuine best-regularized fit.
+    </p>
+
+    <h3>Raw output (results_summary)</h3>
+    <pre><code>future_volatility val R²:  raw +0.333 | untrained +0.097 | trained +0.118 | timesfm −0.134
+future_return     val R²:  raw +0.012 | untrained −0.041 | trained −0.058 | timesfm −0.081
+direction      val acc  :  raw 0.528  | untrained 0.571  | trained 0.535  | timesfm 0.539
+decision_inputs : C(timesfm vol)=−0.134  Fl(untrained vol)=+0.097  Rw(raw vol)=+0.333
+                  best_dir_acc=0.571  majority=0.528  binom_se=0.0094
+commit=false  hold=false  direction_near_majority=false</code></pre>
+    <div class="callout warning">
+      <strong>nb04 verdict-string bug (fixed in the notebook).</strong> The automated message printed
+      "INTERMEDIATE: TimesFM beats floor" — wrong, since C=−0.134 &lt; Fl=+0.097. The <code>else</code>
+      branch assumed "above floor, below the commit margin" and didn't handle C &lt; floor. Patched to
+      emit "REFUTE/HOLD: TimesFM is BELOW the random floor" when <code>C &lt; Fl − 0.01</code>. The
+      numbers were always correct; only the printed label was misleading.
+    </div>
+  </section>
+
+  <!-- ═══ ANALYSIS ═══ -->
+  <section class="section">
+    <h2>Analysis &amp; Findings</h2>
+
+    <h3>1. TimesFM (this variant) does not clear the ceiling</h3>
+    <p>
+      RAW TimesFM pooled features are anti-informative for volatility on val (−0.134) despite a healthy
+      train R² (+0.246) — a textbook probe-overfit signature at D=1280, and even maximal in-grid
+      regularization (α=1e4) cannot pull val above zero. The supposed ceiling is the worst of the four
+      on <em>both</em> regression targets. There is a real confound — TimesFM was fed only the close
+      channel (<code>variant="close"</code>) while raw-input saw all six — so this does not fully
+      exonerate a multivariate TimesFM. But two things are already clear: (a) the close-channel
+      pretrained representation does not linearly expose volatility better than a random projection,
+      and (b) it overfits badly through a 2-patch pool. That is enough to refuse the pivot on current
+      evidence.
+    </p>
+
+    <div class="callout success">
+      <h3 style="margin-top:0">2. The dominant finding: trivial moments beat everything on volatility</h3>
+      <p>
+        raw-input's <strong>+0.333</strong> vol R² (val ≥ train, α mid-grid — a robust, non-overfit
+        fit) is ~3.4× the random floor and the only number in the whole study that represents strong,
+        reliable downstream signal. Volatility clusters, so a crude summary of recent context predicts
+        future volatility almost linearly. Every learned/pretrained representation — random, trained,
+        and TimesFM — <em>underperforms</em> four moments per channel.
+      </p>
+    </div>
+
+    <div class="callout insight">
+      <strong>Why the encoders can't match it — a likely input-pipeline flaw.</strong> The collector
+      normalizes each context window per-channel by its own mean/std, so by construction
+      <code>std(normalized) ≈ 1</code> for every sample — the absolute volatility level (the single
+      best predictor of future volatility) is normalized away before the encoder sees it. raw-input
+      still scores +0.333, most plausibly via the residual that leaks through the
+      <code>σ + 1e-6</code> floor (<code>std/(std+ε)</code> is monotone in raw σ) and the per-channel
+      "last" values. If that is right, the encoders receive the same leaked residue but fail to use it,
+      while a linear probe on explicit moments extracts it directly. <strong>Implication:</strong> for
+      a volatility target, causal per-sample scale normalization may be removing the very signal — the
+      encoder needs access to scale (e.g. realized vol as an explicit feature, or don't normalize scale
+      away).
+    </div>
+
+    <h3>3. Return is ~unpredictable; direction signal is weak and learned reps don't help</h3>
+    <p>
+      All future_return val R² are ≤ +0.012 (mostly negative) — consistent with an H=16 return being
+      close to a martingale from price alone. On direction, only the <em>untrained random projection</em>
+      clears the majority baseline by &gt;2·SE (0.571 vs 0.528); trained <code>z_price</code> (0.535)
+      and TimesFM (0.539) sit on chance. A random projection out-decoding a pretrained foundation model
+      on direction is another statement that, for these targets at this horizon, representation richness
+      is not the binding constraint.
+    </p>
+  </section>
+
+  <!-- ═══ THOUGHT PROCESS ═══ -->
+  <section class="section">
+    <h2>Thought Process &amp; Debugging Notes</h2>
+    <p>
+      First check on a −0.134 ceiling was "is the probe broken?" — ruled out the same way as Stage 1:
+      the identical harness produces sensible numbers for the other three encoders (raw +0.333,
+      untrained +0.097), so the harness is fine and TimesFM genuinely overfits. The α-pinning told the
+      rest of the story: vol/return pinned at the grid max (under-regularized, overfit) and direction
+      at the grid min (over-regularized, underfit) — a 1280-dim representation straining the probe at
+      both ends. Widening the grid was tempting but pointless: a vol fit already at α=1e4 and still
+      −0.134 will not cross zero with more L2.
+    </p>
+    <p>
+      The instinct to read the automated "INTERMEDIATE: beats floor" at face value was the trap — the
+      verdict string was buggy (C &lt; Fl was never above the floor). The raw numbers, not the printed
+      label, are load-bearing; the label is now fixed. The bigger discipline lesson: the experiment was
+      framed entirely around the ceiling (TimesFM), and the decisive result came from the control
+      (raw-input). Always include the trivial baseline — here it inverted the conclusion from
+      "which backbone?" to "the learned approach is losing to four moments".
+    </p>
+  </section>
+
+  <!-- ═══ LESSONS ═══ -->
+  <section class="section">
+    <h2>Lessons Learned</h2>
+    <ul>
+      <li>
+        <strong>The raw-input baseline is the most important encoder in the study.</strong> It reframed
+        the bar from the +0.097 random floor to +0.33. Any learned model must beat the trivial baseline,
+        not just a random projection.
+      </li>
+      <li>
+        <strong>A pretrained backbone is not automatically a richer probe target.</strong> RAW
+        close-channel TimesFM overfit to a negative val R² — high capacity + a coarse 2-patch pool +
+        per-sample-normalized inputs can be worse than 24 hand-crafted features.
+      </li>
+      <li>
+        <strong>Normalization can delete the target signal.</strong> Causal per-window scale
+        normalization removes absolute volatility level — fine for return/direction, likely harmful for
+        a volatility target. Match the normalization to the target.
+      </li>
+      <li>
+        <strong>Boundary-pinning at BOTH ends flags a capacity/regularization mismatch, not just a
+        narrow grid.</strong> TimesFM wanting α→max on regression and α→min on direction is the D=1280
+        probe straining; more grid won't fix a structural overfit.
+      </li>
+      <li>
+        <strong>Trust the numbers over the auto-verdict.</strong> The "beats floor" string was wrong;
+        the table was right. Verdict logic needs an explicit C &lt; floor branch.
+      </li>
+    </ul>
+  </section>
+
+  <!-- ═══ NEXT STEPS ═══ -->
+  <section class="section">
+    <h2>Next Steps</h2>
+    <ol>
+      <li>
+        <strong>HOLD the TimesFM pivot.</strong> Do not spend training units on a frozen-TimesFM JEPA
+        loop — the ceiling probe does not clear the floor.
+      </li>
+      <li>
+        <strong>Confirm what carries raw-input's +0.333 (forward passes only).</strong> Probe raw-input
+        on UN-normalized context, and a single feature = raw context std, to test the
+        "normalization removes scale" hypothesis. If raw σ alone reproduces ~+0.33, the input pipeline
+        — not the backbone — is the lever for the volatility target.
+      </li>
+      <li>
+        <strong>Only if (2) is inconclusive, run TimesFM <code>variant="concat6"</code></strong> (all
+        six channels concatenated) to close the channel confound. Lower priority: the moment baseline
+        already shows representation richness is not the binding constraint here.
+      </li>
+      <li>
+        <strong>Re-bar the project.</strong> The Stage 1 floor is no longer the reference for
+        volatility — <mark>+0.33 val R²</mark> (raw moments) is. Any learned/JEPA representation must
+        beat the trivial baseline to justify training. Re-examine whether volatility is the right target
+        to chase with representation learning, or whether the value is in harder targets (direction
+        with conditioning) or in adding options/futures/text conditioning where moments fail.
+      </li>
+    </ol>
+  </section>
+
+  <footer class="site-footer">
+    JEPA-Quant &mdash; <a href="../index.html">Research Log</a> &mdash;
+    <a href="https://github.com/shreyasnat2804/JEPA-quant">GitHub</a>
+  </footer>
+
+</div>
+</body>
+</html>
