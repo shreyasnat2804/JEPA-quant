@@ -105,26 +105,31 @@ def _collect_probe_pairs_fn(
     split: str,
     n_batches: int,
     device: torch.device,
+    normalize_context: bool = True,
 ) -> dict[str, Tensor]:
     """Run ``encode_fn`` over ``split`` and return features + every probe target.
 
     This is the source-agnostic collector: it knows nothing about JEPAComponents,
-    projection heads, or TimesFM — only that ``encode_fn`` maps a normalized
-    context window ``[B, L, F]`` to a representation ``[B, D]``. All probe targets
-    are derived here from the RAW (unnormalized) target windows so their scale is
-    comparable across samples and across feature extractors.
+    projection heads, or TimesFM — only that ``encode_fn`` maps a context window
+    ``[B, L, F]`` to a representation ``[B, D]``. All probe targets are derived here
+    from the RAW (unnormalized) target windows so their scale is comparable across
+    samples and across feature extractors.
 
     Returned tensors (all CPU float32 except ``y_sign`` which is long):
-        z            [N, D]  representation (per-sample-normalized context).
+        z            [N, D]  representation of the context window.
         y_return     [N]     sum of close log-returns over horizon
         y_sign       [N]     1 if y_return > 0 else 0
         y_volatility [N]     std of close log-returns over horizon
 
-    The context is re-normalized here exactly as PriceWindowDataset does when
-    normalize=True (per-sample mean/std on the context only, +1e-6 floor), so any
-    encoder sees the training-time distribution. The input is moved to ``device``
-    before ``encode_fn`` is called; ``encode_fn`` is responsible for its model's
-    own device/eval placement and returns a tensor that is moved to CPU here.
+    ``normalize_context`` (default ``True``): the context is re-normalized exactly
+    as PriceWindowDataset does when normalize=True (per-sample mean/std on the
+    context only, +1e-6 floor), so any encoder sees the training-time distribution.
+    Set ``False`` to feed the RAW (un-normalized) context — this is the nb05 lever
+    for testing whether per-sample normalization is what erases the absolute
+    volatility level (the suspected reason a frozen backbone can't match a raw-σ
+    feature). The input is moved to ``device`` before ``encode_fn`` is called;
+    ``encode_fn`` owns its model's device/eval placement and returns a tensor that
+    is moved to CPU here.
     """
     loader = _build_split_loader(cfg, split, normalize=False)
 
@@ -146,12 +151,16 @@ def _collect_probe_pairs_fn(
             vol = tgt_close.std(dim=1, unbiased=False)      # [B]
 
             # Re-normalize context exactly as PriceWindowDataset does when
-            # normalize=True, so the encoder sees its training distribution.
-            mu = ctx_raw.mean(dim=1, keepdim=True)          # [B, 1, F]
-            sigma = ctx_raw.std(dim=1, keepdim=True) + 1e-6 # [B, 1, F]
-            ctx_norm = (ctx_raw - mu) / sigma
+            # normalize=True, so the encoder sees its training distribution —
+            # unless normalize_context=False (nb05 raw-context lever).
+            if normalize_context:
+                mu = ctx_raw.mean(dim=1, keepdim=True)          # [B, 1, F]
+                sigma = ctx_raw.std(dim=1, keepdim=True) + 1e-6 # [B, 1, F]
+                ctx_in = (ctx_raw - mu) / sigma
+            else:
+                ctx_in = ctx_raw
 
-            z = encode_fn(ctx_norm.to(device)).cpu()        # [B, D]
+            z = encode_fn(ctx_in.to(device)).cpu()          # [B, D]
 
             zs.append(z)
             rets.append(cum_ret)
@@ -345,6 +354,7 @@ def _fit_regression(
     val: dict[str, Tensor],
     target_kind: RegressionTarget,
     ridge_alphas: Sequence[float],
+    return_val_predictions: bool = False,
 ) -> dict:
     """Ridge alpha-sweep over collected (z, target) pairs. Source-agnostic.
 
@@ -353,6 +363,12 @@ def _fit_regression(
     contents of ``train``/``val`` and ``ridge_alphas`` — no randomness — so the
     components path and the encode_fn path produce bit-identical output when fed
     the same collected pairs.
+
+    ``return_val_predictions`` is an ADDITIVE opt-in (default ``False`` so the
+    Stage 1 / nb04 result dicts stay bit-identical): when ``True`` the dict also
+    carries ``val_predictions`` and ``val_targets`` (CPU float Tensors at the
+    best alpha), so a predicted-vs-actual scatter can plot exactly the points
+    that produced the reported ``val_r2``. Used by nb05's diagnosis plots.
     """
     y_key = "y_return" if target_kind == "future_return" else "y_volatility"
     X_tr, X_va = _standardize(train["z"], val["z"])
@@ -406,6 +422,12 @@ def _fit_regression(
         # For volatility (strictly positive) it would degenerate to ~1.0.
         out["sign_agreement"] = float(((val_pred > 0) == (y_va > 0)).float().mean())
         out["positive_rate_val"] = float((y_va > 0).float().mean())
+    if return_val_predictions:
+        # Detach to plain CPU float tensors so callers can scatter/serialize
+        # without dragging the fit graph. These are exactly the points behind
+        # the reported ``val_r2`` (best alpha), not a re-fit.
+        out["val_predictions"] = val_pred.detach().float().cpu()
+        out["val_targets"] = y_va.detach().float().cpu()
     return out
 
 
@@ -587,19 +609,22 @@ def probe_regression_features(
     seed: int = 42,
     device: Optional[str] = None,
     source_label: str = "custom",
+    normalize_context: bool = True,
 ) -> dict:
     """Ridge probe over an ARBITRARY feature extractor ``encode_fn``.
 
     Identical fitting path to ``linear_probe_regression`` (shares ``_fit_regression``
     and the same collector core), but the representation comes from any callable
-    ``encode_fn(ctx_norm[B,L,F]) -> [B,D]`` instead of a JEPAComponents encoder.
+    ``encode_fn(ctx[B,L,F]) -> [B,D]`` instead of a JEPAComponents encoder.
     Used by nb04 to score raw inputs, z_price, and frozen TimesFM through one
     comparable harness. ``source_label`` is stamped into the returned dict under
     ``probe_source`` so result tables can name the representation.
 
-    The numbers for an ``encode_fn`` that wraps ``components.price_encoder`` match
-    ``linear_probe_regression(..., probe_source="z_price")`` bit-for-bit at the
-    same seed — both collect via the same core and fit via the same helper.
+    ``normalize_context`` (default ``True``) is forwarded to the collector: ``False``
+    feeds the RAW un-normalized context (nb05 lever for the normalization-erases-vol
+    test). With the default, the numbers for an ``encode_fn`` that wraps
+    ``components.price_encoder`` match ``linear_probe_regression(...,
+    probe_source="z_price")`` bit-for-bit at the same seed.
     """
     if target_kind not in ("future_return", "future_volatility"):
         raise ValueError(
@@ -609,8 +634,12 @@ def probe_regression_features(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    train = _collect_probe_pairs_fn(encode_fn, cfg, "train", n_train_batches, dev)
-    val = _collect_probe_pairs_fn(encode_fn, cfg, "val", n_val_batches, dev)
+    train = _collect_probe_pairs_fn(
+        encode_fn, cfg, "train", n_train_batches, dev, normalize_context
+    )
+    val = _collect_probe_pairs_fn(
+        encode_fn, cfg, "val", n_val_batches, dev, normalize_context
+    )
 
     out = _fit_regression(train, val, target_kind, ridge_alphas)
     out["probe_source"] = source_label
@@ -628,18 +657,24 @@ def probe_direction_features(
     device: Optional[str] = None,
     max_iter: int = 200,
     source_label: str = "custom",
+    normalize_context: bool = True,
 ) -> dict:
     """Logistic probe over an ARBITRARY feature extractor ``encode_fn``.
 
     Encode_fn analogue of ``linear_probe_direction`` (shares ``_fit_direction``).
-    See ``probe_regression_features`` for the comparability guarantee.
+    See ``probe_regression_features`` for the comparability guarantee and the
+    ``normalize_context`` lever.
     """
     dev = resolve_device(device or "cpu")
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    train = _collect_probe_pairs_fn(encode_fn, cfg, "train", n_train_batches, dev)
-    val = _collect_probe_pairs_fn(encode_fn, cfg, "val", n_val_batches, dev)
+    train = _collect_probe_pairs_fn(
+        encode_fn, cfg, "train", n_train_batches, dev, normalize_context
+    )
+    val = _collect_probe_pairs_fn(
+        encode_fn, cfg, "val", n_val_batches, dev, normalize_context
+    )
 
     out = _fit_direction(train, val, alphas, max_iter)
     out["probe_source"] = source_label
